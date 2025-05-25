@@ -12,6 +12,7 @@ from reportlab.lib.units import inch
 import io
 import base64
 import streamlit.components.v1 as components
+import time
 
 # Transcription storage settings
 TRANSCRIPTIONS_DIR = "transcriptions"
@@ -252,8 +253,211 @@ def create_pdf_report(report_text, transcript_text, transcription_id=None):
         st.error(f"Error creating PDF: {str(e)}")
         return None
 
+def get_web_speech_component():
+    """Return HTML/JS component for Web Speech API real-time transcription"""
+    return """
+    <div id="speech-transcriber" style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 12px; margin: 10px 0;">
+        <div id="speech-status" style="margin-bottom: 15px; font-weight: 500; color: #495057;">
+            🎤 Ready for real-time transcription
+        </div>
+        
+        <div style="margin-bottom: 15px;">
+            <button id="start-speech-btn" onclick="startSpeechRecognition()" 
+                    style="background: linear-gradient(135deg, #28a745, #20c997); color: white; border: none; 
+                           padding: 12px 24px; border-radius: 8px; font-weight: 500; margin: 5px; cursor: pointer;
+                           box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);">
+                🔴 Start Live Transcription
+            </button>
+            
+            <button id="stop-speech-btn" onclick="stopSpeechRecognition()" disabled
+                    style="background: linear-gradient(135deg, #dc3545, #c82333); color: white; border: none; 
+                           padding: 12px 24px; border-radius: 8px; font-weight: 500; margin: 5px; cursor: pointer;
+                           box-shadow: 0 2px 8px rgba(220, 53, 69, 0.3);">
+                ⏹️ Stop Transcription
+            </button>
+            
+            <button id="save-speech-btn" onclick="saveTranscript()" disabled
+                    style="background: linear-gradient(135deg, #667eea, #764ba2); color: white; border: none; 
+                           padding: 12px 24px; border-radius: 8px; font-weight: 500; margin: 5px; cursor: pointer;
+                           box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);">
+                💾 Save Transcript
+            </button>
+        </div>
+        
+        <div id="speech-time" style="font-size: 18px; font-weight: 600; color: #667eea; margin-bottom: 10px;">
+            00:00
+        </div>
+        
+        <div id="speech-transcript-display" style="background: white; border: 2px solid #e9ecef; border-radius: 8px; 
+                                                    padding: 15px; margin: 15px 0; min-height: 150px; text-align: left;
+                                                    font-family: 'Inter', sans-serif; line-height: 1.5; display: none;">
+            <div style="font-weight: 600; color: #495057; margin-bottom: 10px; border-bottom: 1px solid #e9ecef; padding-bottom: 5px;">
+                📝 Live Transcription
+            </div>
+            <div id="final-speech-transcript" style="color: #2d3748; margin-bottom: 10px;"></div>
+            <div id="interim-speech-transcript" style="color: #6c757d; font-style: italic;"></div>
+        </div>
+        
+        <div id="language-info" style="font-size: 12px; color: #6c757d; margin-top: 10px;">
+            Using browser's speech recognition (language auto-detected)
+        </div>
+    </div>
+
+    <script>
+    let speechRecognition;
+    let finalTranscript = '';
+    let isRecognizing = false;
+    let speechStartTime;
+    let speechTimerInterval;
+
+    // Check if browser supports speech recognition
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        speechRecognition = new SpeechRecognition();
+        
+        // Configure speech recognition
+        speechRecognition.continuous = true;
+        speechRecognition.interimResults = true;
+        speechRecognition.maxAlternatives = 1;
+        
+        // Set language based on browser locale or default to English
+        speechRecognition.lang = navigator.language || 'en-US';
+        
+        speechRecognition.onstart = function() {
+            isRecognizing = true;
+            document.getElementById('speech-status').innerHTML = '🔴 Listening... Speak now!';
+            document.getElementById('speech-status').style.color = '#dc3545';
+            document.getElementById('speech-transcript-display').style.display = 'block';
+            document.getElementById('interim-speech-transcript').innerHTML = 'Listening for speech...';
+        };
+        
+        speechRecognition.onresult = function(event) {
+            let interimTranscript = '';
+            
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const transcript = event.results[i][0].transcript;
+                
+                if (event.results[i].isFinal) {
+                    finalTranscript += transcript + ' ';
+                    document.getElementById('final-speech-transcript').innerHTML = finalTranscript;
+                    document.getElementById('interim-speech-transcript').innerHTML = 'Listening for more speech...';
+                } else {
+                    interimTranscript += transcript;
+                    document.getElementById('interim-speech-transcript').innerHTML = interimTranscript;
+                }
+            }
+        };
+        
+        speechRecognition.onerror = function(event) {
+            console.error('Speech recognition error:', event.error);
+            let errorMessage = 'Speech recognition error: ';
+            switch(event.error) {
+                case 'no-speech':
+                    errorMessage += 'No speech detected. Try speaking louder.';
+                    break;
+                case 'audio-capture':
+                    errorMessage += 'Microphone not accessible.';
+                    break;
+                case 'not-allowed':
+                    errorMessage += 'Microphone permission denied.';
+                    break;
+                default:
+                    errorMessage += event.error;
+            }
+            document.getElementById('speech-status').innerHTML = '❌ ' + errorMessage;
+            document.getElementById('speech-status').style.color = '#dc3545';
+        };
+        
+        speechRecognition.onend = function() {
+            isRecognizing = false;
+            document.getElementById('start-speech-btn').disabled = false;
+            document.getElementById('stop-speech-btn').disabled = true;
+            
+            if (finalTranscript.trim()) {
+                document.getElementById('save-speech-btn').disabled = false;
+                document.getElementById('speech-status').innerHTML = '✅ Transcription completed. Click Save to store.';
+                document.getElementById('speech-status').style.color = '#28a745';
+            } else {
+                document.getElementById('speech-status').innerHTML = '⚠️ No speech detected. Try again.';
+                document.getElementById('speech-status').style.color = '#ffc107';
+            }
+            
+            clearInterval(speechTimerInterval);
+        };
+        
+    } else {
+        document.getElementById('speech-status').innerHTML = '❌ Speech recognition not supported in this browser';
+        document.getElementById('speech-status').style.color = '#dc3545';
+        document.getElementById('start-speech-btn').disabled = true;
+    }
+
+    function startSpeechRecognition() {
+        if (speechRecognition && !isRecognizing) {
+            finalTranscript = '';
+            document.getElementById('final-speech-transcript').innerHTML = '';
+            document.getElementById('interim-speech-transcript').innerHTML = '';
+            
+            document.getElementById('start-speech-btn').disabled = true;
+            document.getElementById('stop-speech-btn').disabled = false;
+            document.getElementById('save-speech-btn').disabled = true;
+            
+            speechStartTime = Date.now();
+            speechTimerInterval = setInterval(updateSpeechTimer, 1000);
+            
+            speechRecognition.start();
+        }
+    }
+
+    function stopSpeechRecognition() {
+        if (speechRecognition && isRecognizing) {
+            speechRecognition.stop();
+        }
+    }
+
+    function updateSpeechTimer() {
+        const elapsed = Math.floor((Date.now() - speechStartTime) / 1000);
+        const minutes = Math.floor(elapsed / 60);
+        const seconds = elapsed % 60;
+        document.getElementById('speech-time').textContent = 
+            `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    function saveTranscript() {
+        if (finalTranscript.trim()) {
+            // Send transcript to Streamlit parent window
+            window.parent.postMessage({
+                type: 'speech_transcript_ready',
+                transcript: finalTranscript.trim()
+            }, '*');
+            
+            document.getElementById('speech-status').innerHTML = '💾 Transcript sent to application!';
+            document.getElementById('speech-status').style.color = '#667eea';
+            document.getElementById('save-speech-btn').disabled = true;
+            
+            // Reset for next session
+            setTimeout(resetSpeechTranscriber, 2000);
+        }
+    }
+
+    function resetSpeechTranscriber() {
+        finalTranscript = '';
+        document.getElementById('start-speech-btn').disabled = false;
+        document.getElementById('stop-speech-btn').disabled = true;
+        document.getElementById('save-speech-btn').disabled = true;
+        document.getElementById('speech-status').innerHTML = '🎤 Ready for real-time transcription';
+        document.getElementById('speech-status').style.color = '#495057';
+        document.getElementById('speech-time').textContent = '00:00';
+        document.getElementById('speech-transcript-display').style.display = 'none';
+        
+        if (speechTimerInterval) {
+            clearInterval(speechTimerInterval);
+        }
+    }
+    </script>
+    """
+
 def get_audio_recorder_component():
-    """Return the HTML/JS component for browser-based audio recording"""
+    """Return the HTML/JS component for browser-based audio recording (fallback)"""
     return """
     <div id="audio-recorder" style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 12px; margin: 10px 0;">
         <div id="recorder-status" style="margin-bottom: 15px; font-weight: 500; color: #495057;">
@@ -305,7 +509,6 @@ def get_audio_recorder_component():
 
     async function startRecording() {
         try {
-            // Request microphone access
             stream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
                     sampleRate: 16000,
@@ -315,7 +518,6 @@ def get_audio_recorder_component():
                 } 
             });
             
-            // Create MediaRecorder
             mediaRecorder = new MediaRecorder(stream, {
                 mimeType: 'audio/webm;codecs=opus'
             });
@@ -336,23 +538,19 @@ def get_audio_recorder_component():
                 audioPlayback.src = audioUrl;
                 audioPlayback.style.display = 'block';
                 
-                // Create download link
                 const downloadLink = document.getElementById('download-link');
                 downloadLink.href = audioUrl;
                 document.getElementById('download-section').style.display = 'block';
             };
             
-            // Start recording
-            mediaRecorder.start(1000); // Collect data every second
+            mediaRecorder.start(1000);
             recordingStartTime = Date.now();
             
-            // Update UI
             document.getElementById('start-btn').disabled = true;
             document.getElementById('stop-btn').disabled = false;
             document.getElementById('recorder-status').innerHTML = '🔴 Recording in progress...';
             document.getElementById('recorder-status').style.color = '#dc3545';
             
-            // Start timer
             timerInterval = setInterval(updateTimer, 1000);
             
         } catch (error) {
@@ -366,18 +564,15 @@ def get_audio_recorder_component():
         if (mediaRecorder && mediaRecorder.state === 'recording') {
             mediaRecorder.stop();
             
-            // Stop all tracks
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
             }
             
-            // Update UI
             document.getElementById('start-btn').disabled = false;
             document.getElementById('stop-btn').disabled = true;
             document.getElementById('recorder-status').innerHTML = '✅ Recording completed - Download and upload using the Upload tab';
             document.getElementById('recorder-status').style.color = '#28a745';
             
-            // Stop timer
             clearInterval(timerInterval);
         }
     }
@@ -389,23 +584,76 @@ def get_audio_recorder_component():
         document.getElementById('recording-time').textContent = 
             `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     }
-
-    // Reset function
-    function resetRecorder() {
-        document.getElementById('start-btn').disabled = false;
-        document.getElementById('stop-btn').disabled = true;
-        document.getElementById('recorder-status').innerHTML = '🎤 Ready to record';
-        document.getElementById('recorder-status').style.color = '#495057';
-        document.getElementById('recording-time').textContent = '00:00';
-        document.getElementById('audio-playback').style.display = 'none';
-        document.getElementById('download-section').style.display = 'none';
-        
-        if (timerInterval) {
-            clearInterval(timerInterval);
-        }
-    }
     </script>
     """
+
+def transcribe_audio_chunk(audio_data, language_code):
+    """Transcribe audio chunk for real-time processing"""
+    try:
+        credentials = get_credentials()
+        if not credentials:
+            return None
+            
+        client = speech.SpeechClient(credentials=credentials)
+        
+        # Decode base64 audio
+        audio_content = base64.b64decode(audio_data)
+        
+        # Configure recognition for WebM audio chunks
+        audio = speech.RecognitionAudio(content=audio_content)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
+            sample_rate_hertz=48000,
+            language_code=language_code,
+            enable_automatic_punctuation=True,
+        )
+        
+        # Perform transcription
+        response = client.recognize(config=config, audio=audio)
+        
+        # Extract transcript
+        results = []
+        for result in response.results:
+            results.append({
+                'transcript': result.alternatives[0].transcript,
+                'confidence': result.alternatives[0].confidence,
+                'is_final': True  # For chunk-based processing, we treat each result as final
+            })
+        
+        return results
+        
+    except Exception as e:
+        st.error(f"Error transcribing audio chunk: {str(e)}")
+        return None
+
+def handle_real_time_messages():
+    """Handle JavaScript messages for real-time transcription"""
+    st.markdown("""
+    <script>
+    // Simple message handling for real-time transcription
+    window.addEventListener('message', function(event) {
+        if (event.data.type === 'transcribe_audio_chunk') {
+            // Use Streamlit's query params to trigger processing
+            const urlParams = new URLSearchParams(window.location.search);
+            urlParams.set('audio_chunk', Date.now());
+            urlParams.set('chunk_data', event.data.audio_data);
+            window.history.replaceState({}, '', `${window.location.pathname}?${urlParams}`);
+            
+            // Trigger page refresh to process the chunk
+            window.location.reload();
+        }
+        
+        if (event.data.type === 'save_final_transcript') {
+            // Use session storage to pass the transcript
+            sessionStorage.setItem('final_transcript', event.data.transcript);
+            sessionStorage.setItem('save_timestamp', Date.now());
+            
+            // Trigger page refresh to save
+            window.location.reload();
+        }
+    });
+    </script>
+    """, unsafe_allow_html=True)
 
 def main():
     st.set_page_config(
@@ -545,17 +793,88 @@ def main():
         tab1, tab2, tab3 = st.tabs(["🎤 Record Audio", "📁 Upload Audio File", "✍️ Text Input"])
         
         with tab1:
-            st.markdown("**Record audio directly in your browser**")
+            st.markdown("**Real-time voice transcription**")
             
-            st.info("🎤 **How to use the recorder:**\n"
-                   "1. Click 'Start Recording' and allow microphone access\n"
-                   "2. Speak your medical conversation\n"
-                   "3. Click 'Stop Recording' when finished\n"
-                   "4. Download the recording\n"
-                   "5. Upload the downloaded file in the 'Upload Audio File' tab")
+            st.info("🎤 **Real-time Transcription:**\n"
+                   "• Uses your browser's built-in speech recognition\n"
+                   "• Works offline and processes speech locally\n"
+                   "• Click 'Start Live Transcription' and speak naturally\n"
+                   "• Transcription appears in real-time as you speak\n"
+                   "• Click 'Save Transcript' when finished")
             
-            # Audio recorder component
-            components.html(get_audio_recorder_component(), height=350)
+            # Web Speech API component
+            components.html(get_web_speech_component(), height=450)
+            
+            # Handle transcript from Web Speech API
+            st.markdown("""
+            <script>
+            window.addEventListener('message', function(event) {
+                if (event.data.type === 'speech_transcript_ready') {
+                    // Store transcript in session storage for Streamlit to pick up
+                    sessionStorage.setItem('web_speech_transcript', event.data.transcript);
+                    sessionStorage.setItem('transcript_timestamp', Date.now());
+                    
+                    // Trigger a page refresh to process the transcript
+                    window.location.reload();
+                }
+            });
+            
+            // Check for saved transcript on page load
+            window.addEventListener('load', function() {
+                const savedTranscript = sessionStorage.getItem('web_speech_transcript');
+                const timestamp = sessionStorage.getItem('transcript_timestamp');
+                
+                if (savedTranscript && timestamp) {
+                    // Clear from session storage
+                    sessionStorage.removeItem('web_speech_transcript');
+                    sessionStorage.removeItem('transcript_timestamp');
+                    
+                    // Show success message
+                    const successDiv = document.createElement('div');
+                    successDiv.style.cssText = 'background: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #c3e6cb;';
+                    successDiv.innerHTML = '✅ Transcript received from speech recognition!';
+                    document.body.insertBefore(successDiv, document.body.firstChild);
+                }
+            });
+            </script>
+            """, unsafe_allow_html=True)
+            
+            # Check for transcript in session storage (after page reload)
+            transcript_from_js = st.query_params.get("transcript", None)
+            if not transcript_from_js:
+                # Try to get from URL parameters (alternative method)
+                import urllib.parse
+                current_url = st.query_params
+                if "web_speech_transcript" in current_url:
+                    transcript_from_js = urllib.parse.unquote(current_url["web_speech_transcript"])
+            
+            # Process received transcript
+            if transcript_from_js and transcript_from_js.strip():
+                # Save the transcript
+                transcription_id = save_transcription(transcript_from_js.strip(), "web-speech-api")
+                st.session_state.current_transcript = transcript_from_js.strip()
+                st.session_state.last_transcription_id = transcription_id
+                
+                st.success(f"✅ Real-time transcription saved! (ID: {transcription_id})")
+                st.info(f"📝 **Transcript Preview:** {transcript_from_js[:100]}...")
+                
+                # Clear the URL parameter
+                st.query_params.clear()
+                
+                # Auto-scroll to show the transcript
+                st.markdown("""
+                <script>
+                setTimeout(function() {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }, 500);
+                </script>
+                """, unsafe_allow_html=True)
+            
+            # Fallback audio recorder
+            with st.expander("🎙️ Alternative: Record & Upload Method", expanded=False):
+                st.markdown("**Use this if the Web Speech API doesn't work on your device**")
+                st.info("This method records audio and lets you download it, then upload it in the 'Upload Audio File' tab for transcription.")
+                components.html(get_audio_recorder_component(), height=350)
         
         with tab2:
             st.markdown("**Upload an audio file for transcription**")
@@ -765,6 +1084,8 @@ def main():
             st.info("📭 No transcriptions yet. Upload an audio file or enter text to get started!")
             
         st.markdown('</div>', unsafe_allow_html=True)
+
+    handle_real_time_messages()
 
 if __name__ == "__main__":
     main() 
