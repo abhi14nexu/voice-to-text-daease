@@ -1,13 +1,9 @@
 import os
-import queue
-import threading
-import time
+import json
 from datetime import datetime
 import streamlit as st
-import pyaudio
 from google.cloud import speech
 from google.oauth2 import service_account
-import json
 from medical_report_generator import MedicalReportGenerator
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -15,11 +11,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
 import base64
-
-# Audio recording parameters
-RATE = 16000
-CHUNK = int(RATE / 10)  # 100ms chunks
-CHANNELS = 1
 
 # Transcription storage settings
 TRANSCRIPTIONS_DIR = "transcriptions"
@@ -32,8 +23,24 @@ SUPPORTED_LANGUAGES = {
     "English (India)": "en-IN"
 }
 
-# Maximum duration for a single streaming request (in seconds)
-MAX_STREAMING_DURATION = 270  # 4.5 minutes to be safe
+def get_credentials():
+    """Get Google Cloud credentials from Streamlit secrets or file"""
+    try:
+        # Try Streamlit secrets first (for cloud deployment)
+        if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
+            credentials_info = dict(st.secrets["gcp_service_account"])
+            credentials = service_account.Credentials.from_service_account_info(credentials_info)
+            return credentials
+        else:
+            # Fallback to local file
+            credentials = service_account.Credentials.from_service_account_file(
+                "daease-transcription-4f98056e2b9c.json"
+            )
+            return credentials
+    except Exception as e:
+        st.error(f"Failed to load credentials: {str(e)}")
+        st.error("Please check your Google Cloud credentials configuration.")
+        return None
 
 def load_transcription_counter():
     """Load the current transcription counter and data"""
@@ -43,7 +50,7 @@ def load_transcription_counter():
             return data.get('counter', 0), data.get('transcriptions', {})
     return 0, {}
 
-def save_transcription(full_transcript, session_transcript, language_code):
+def save_transcription(transcript_text, language_code):
     """Save transcription with counter and metadata"""
     os.makedirs(TRANSCRIPTIONS_DIR, exist_ok=True)
     
@@ -57,10 +64,8 @@ def save_transcription(full_transcript, session_transcript, language_code):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_transcription = {
         'timestamp': timestamp,
-        'full_transcript': full_transcript,
-        'session_transcript': session_transcript,
-        'word_count': sum(len(text.split()) for text in session_transcript),
-        'duration_seconds': None,  # Will be added in stop_recording
+        'transcript': transcript_text,
+        'word_count': len(transcript_text.split()),
         'language': language_code
     }
     
@@ -79,222 +84,52 @@ def save_transcription(full_transcript, session_transcript, language_code):
     
     return counter
 
-class AudioTranscriber:
-    def __init__(self, credentials_path, language_code="en-US"):
-        try:
-            # Create credentials and client
-            self.credentials = service_account.Credentials.from_service_account_file(credentials_path)
-            self.client = speech.SpeechClient(credentials=self.credentials)
-            self.language_code = language_code
+def transcribe_audio_file(audio_file, language_code):
+    """Transcribe uploaded audio file using Google Cloud Speech-to-Text"""
+    try:
+        credentials = get_credentials()
+        if not credentials:
+            return None
             
-        except Exception as e:
-            st.error(f"Failed to initialize Speech-to-Text client: {str(e)}")
-            st.stop()
-            
-        self.audio_queue = queue.Queue()
-        self.transcript_queue = queue.Queue()
-        self.is_recording = False
-        self.full_transcript = []
-        self.current_session = []
-        self.start_time = None
-        self.stream_start_time = None
-        self.current_interim = ""
+        client = speech.SpeechClient(credentials=credentials)
         
-        # Configure the recognition with standard settings
-        self.streaming_config = speech.StreamingRecognitionConfig(
-            config=speech.RecognitionConfig(
-                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=RATE,
-                language_code=language_code,
-                enable_automatic_punctuation=True
-            ),
-            interim_results=True,
+        # Read audio file
+        audio_content = audio_file.read()
+        
+        # Configure recognition
+        audio = speech.RecognitionAudio(content=audio_content)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=16000,
+            language_code=language_code,
+            enable_automatic_punctuation=True,
         )
-
-    def should_restart_stream(self):
-        """Check if we should restart the streaming request"""
-        if not self.stream_start_time:
-            return False
-        return (datetime.now() - self.stream_start_time).total_seconds() >= MAX_STREAMING_DURATION
-
-    def audio_callback(self, in_data, frame_count, time_info, status):
-        """Callback for PyAudio to process audio chunks"""
-        if self.is_recording:
-            self.audio_queue.put(in_data)
-        return (in_data, pyaudio.paContinue)
-
-    def process_audio(self):
-        """Process audio chunks and send to Google Speech-to-Text"""
-        while self.is_recording:
-            try:
-                # Create a generator for streaming requests
-                def request_generator():
-                    while self.is_recording and not self.should_restart_stream():
-                        try:
-                            audio_data = self.audio_queue.get(timeout=1)
-                            if audio_data:
-                                request = speech.StreamingRecognizeRequest(audio_content=audio_data)
-                                yield request
-                        except queue.Empty:
-                            continue
-                        except Exception as e:
-                            continue
-
-                # Start streaming recognition
-                self.stream_start_time = datetime.now()
-                requests = request_generator()
-                responses = self.client.streaming_recognize(self.streaming_config, requests)
-                
-                # Process responses
-                for response in responses:
-                    if not self.is_recording:
-                        break
-                    
-                    if self.should_restart_stream():
-                        break
-                        
-                    if not response.results:
-                        continue
-                    
-                    result = response.results[0]
-                    if not result.alternatives:
-                        continue
-                    
-                    transcript = result.alternatives[0].transcript
-                    
-                    if result.is_final:
-                        if transcript.strip():  # Only add non-empty transcripts
-                            self.full_transcript.append(transcript)
-                            self.current_session.append(transcript)
-                            self.transcript_queue.put(("final", transcript))
-                            print(f"Final transcript: {transcript}")  # Debug print
-                        self.current_interim = ""
-                    else:
-                        self.current_interim = transcript
-                        self.transcript_queue.put(("interim", transcript))
-                        
-            except Exception as e:
-                if self.is_recording:  # Only show error if we're still supposed to be recording
-                    print(f"Error in audio processing: {str(e)}")  # Debug print
-                continue  # Continue to retry if there's an error
-
-    def start_recording(self):
-        """Start the recording and transcription process"""
-        self.is_recording = True
-        self.full_transcript = []
-        self.current_session = []
-        self.current_interim = ""
-        self.start_time = datetime.now()
-        self.stream_start_time = None
         
-        print(f"Starting recording with language: {self.language_code}")  # Debug print
+        # Perform transcription
+        response = client.recognize(config=config, audio=audio)
         
-        try:
-            # Initialize PyAudio
-            self.audio = pyaudio.PyAudio()
-            
-            # Find input device
-            input_device_index = None
-            info = self.audio.get_host_api_info_by_index(0)
-            numdevices = info.get('deviceCount')
-            
-            for i in range(numdevices):
-                device_info = self.audio.get_device_info_by_index(i)
-                if device_info.get('maxInputChannels') > 0:
-                    if input_device_index is None:
-                        input_device_index = i
-            
-            if input_device_index is None:
-                raise Exception("No input device found")
-            
-            self.stream = self.audio.open(
-                format=pyaudio.paInt16,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                input_device_index=input_device_index,
-                frames_per_buffer=CHUNK,
-                stream_callback=self.audio_callback
-            )
-            
-            # Start processing thread
-            self.process_thread = threading.Thread(target=self.process_audio)
-            self.process_thread.daemon = True
-            self.process_thread.start()
-            
-            self.stream.start_stream()
-            
-        except Exception as e:
-            st.error(f"Failed to start recording: {str(e)}")
-            self.is_recording = False
-
-    def stop_recording(self):
-        """Stop the recording and transcription process"""
-        print(f"Stopping recording. Current session has {len(self.current_session)} transcripts")  # Debug print
+        # Extract transcript
+        transcript = ""
+        for result in response.results:
+            transcript += result.alternatives[0].transcript + " "
         
-        self.is_recording = False
-        if hasattr(self, 'stream'):
-            self.stream.stop_stream()
-            self.stream.close()
-        if hasattr(self, 'audio'):
-            self.audio.terminate()
-        if hasattr(self, 'process_thread'):
-            self.process_thread.join()
+        return transcript.strip()
         
-        # Calculate duration
-        duration_seconds = None
-        if self.start_time:
-            duration_seconds = (datetime.now() - self.start_time).total_seconds()
-        
-        # Ensure we have the complete transcript
-        final_transcript = self.full_transcript.copy()
-        final_session = self.current_session.copy()
-        
-        print(f"Final transcript length: {len(final_transcript)}")  # Debug print
-        print(f"Final session length: {len(final_session)}")  # Debug print
-        
-        # Only save if we have actual content
-        if final_session and any(text.strip() for text in final_session):
-            # Save transcription and get counter
-            counter = save_transcription(final_transcript, final_session, self.language_code)
-            
-            # Update duration in saved transcription
-            if duration_seconds:
-                _, transcriptions = load_transcription_counter()
-                if str(counter) in transcriptions:
-                    transcriptions[str(counter)]['duration_seconds'] = duration_seconds
-                    data = {
-                        'counter': counter,
-                        'transcriptions': transcriptions,
-                        'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    with open(TRANSCRIPTIONS_FILE, 'w') as f:
-                        json.dump(data, f, indent=2)
-            
-            return counter, final_session
-        else:
-            print("No transcription content to save")  # Debug print
-            return None, []
-
-    def get_current_display_text(self):
-        """Get the current text to display (final + interim)"""
-        display_text = ""
-        if self.current_session:
-            display_text = "\n".join(self.current_session)
-        if self.current_interim:
-            if display_text:
-                display_text += "\n" + self.current_interim
-            else:
-                display_text = self.current_interim
-        return display_text
+    except Exception as e:
+        st.error(f"Error transcribing audio: {str(e)}")
+        return None
 
 def generate_medical_report(transcript):
     """Generate medical report using Google Cloud Vertex AI"""
     try:
         PROJECT_ID = "daease-transcription"
+        credentials = get_credentials()
+        if not credentials:
+            return None
+            
         generator = MedicalReportGenerator(
             project_id=PROJECT_ID, 
-            credentials_path="daease-transcription-4f98056e2b9c.json"
+            credentials=credentials
         )
         
         # Generate the medical report
@@ -306,12 +141,16 @@ def generate_medical_report(transcript):
         return None
 
 def generate_ai_assessment(transcript):
-    """Generate AI medical assessment with disease analysis, severity, and next steps"""
+    """Generate AI medical assessment"""
     try:
         PROJECT_ID = "daease-transcription"
+        credentials = get_credentials()
+        if not credentials:
+            return None
+            
         generator = MedicalReportGenerator(
             project_id=PROJECT_ID, 
-            credentials_path="daease-transcription-4f98056e2b9c.json"
+            credentials=credentials
         )
         
         # Generate the AI assessment
@@ -320,23 +159,6 @@ def generate_ai_assessment(transcript):
         
     except Exception as e:
         st.error(f"Error generating AI assessment: {str(e)}")
-        return None
-
-def generate_comprehensive_analysis(transcript):
-    """Generate both medical report and AI assessment"""
-    try:
-        PROJECT_ID = "daease-transcription"
-        generator = MedicalReportGenerator(
-            project_id=PROJECT_ID, 
-            credentials_path="daease-transcription-4f98056e2b9c.json"
-        )
-        
-        # Generate comprehensive analysis
-        analysis = generator.generate_comprehensive_analysis(transcript)
-        return analysis
-        
-    except Exception as e:
-        st.error(f"Error generating comprehensive analysis: {str(e)}")
         return None
 
 def create_pdf_report(report_text, transcript_text, transcription_id=None):
@@ -370,11 +192,11 @@ def create_pdf_report(report_text, transcript_text, transcription_id=None):
         story.append(Spacer(1, 20))
         
         # Medical Report Section
-        story.append(Paragraph("MEDICAL REPORT", styles['Heading2']))
-        story.append(Spacer(1, 12))
-        
-        # Split report into paragraphs and add them
         if report_text:
+            story.append(Paragraph("MEDICAL REPORT", styles['Heading2']))
+            story.append(Spacer(1, 12))
+            
+            # Split report into paragraphs and add them
             report_paragraphs = report_text.split('\n')
             for para in report_paragraphs:
                 if para.strip():
@@ -411,730 +233,351 @@ def create_pdf_report(report_text, transcript_text, transcription_id=None):
         st.error(f"Error creating PDF: {str(e)}")
         return None
 
-def get_pdf_download_link(pdf_data, filename):
-    """Generate a download link for PDF data"""
-    b64 = base64.b64encode(pdf_data).decode()
-    href = f'<a href="data:application/pdf;base64,{b64}" download="{filename}">📄 Download Medical Report PDF</a>'
-    return href
-
 def main():
     st.set_page_config(
-        page_title="Daease Assistant", 
+        page_title="Medical Voice Transcriber", 
         layout="wide",
         page_icon="🏥",
         initial_sidebar_state="collapsed"
     )
     
-    # Custom CSS for modern design
+    # Modern minimalist CSS
     st.markdown("""
     <style>
-    /* Import Google Fonts */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
     
-    /* Global Styles */
     .main {
         font-family: 'Inter', sans-serif;
+        background-color: #fafbfc;
     }
     
-    /* Header Styling */
-    .main-header {
+    .app-header {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
+        padding: 2.5rem 2rem;
+        border-radius: 16px;
         margin-bottom: 2rem;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        text-align: center;
+        box-shadow: 0 4px 20px rgba(102, 126, 234, 0.15);
     }
     
-    .main-title {
+    .app-title {
         color: white;
-        font-size: 2.5rem;
-        font-weight: 700;
+        font-size: 2.2rem;
+        font-weight: 600;
         margin: 0;
-        text-align: center;
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        letter-spacing: -0.02em;
     }
     
-    .main-subtitle {
-        color: rgba(255,255,255,0.9);
-        font-size: 1.1rem;
-        text-align: center;
+    .app-subtitle {
+        color: rgba(255, 255, 255, 0.85);
+        font-size: 1rem;
         margin-top: 0.5rem;
-        font-weight: 300;
+        font-weight: 400;
     }
     
-    /* Control Panel */
-    .control-panel {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        margin-bottom: 2rem;
-        border: 1px solid #e1e8ed;
-    }
-    
-    /* Status Indicators */
-    .status-recording {
-        background: linear-gradient(135deg, #ff6b6b, #ee5a24);
-        color: white;
-        padding: 0.8rem 1.5rem;
-        border-radius: 25px;
-        text-align: center;
-        font-weight: 600;
-        box-shadow: 0 4px 15px rgba(255,107,107,0.3);
-        animation: pulse 2s infinite;
-    }
-    
-    .status-idle {
-        background: linear-gradient(135deg, #a8e6cf, #7fcdcd);
-        color: #2d3436;
-        padding: 0.8rem 1.5rem;
-        border-radius: 25px;
-        text-align: center;
-        font-weight: 600;
-        box-shadow: 0 4px 15px rgba(168,230,207,0.3);
-    }
-    
-    @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.05); }
-        100% { transform: scale(1); }
-    }
-    
-    /* Card Styling */
-    .transcript-card {
+    .card {
         background: white;
         border-radius: 12px;
         padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        border: 1px solid #e1e8ed;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+        border: 1px solid #e9ecef;
         margin-bottom: 1rem;
     }
     
-    .history-card {
+    .card-header {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #2d3748;
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .report-container {
         background: #f8f9fa;
-        border-radius: 12px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-        border: 1px solid #e9ecef;
-    }
-    
-    /* Medical Report Styling */
-    .medical-report {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        color: white;
-        padding: 2rem;
-        border-radius: 15px;
+        border-radius: 8px;
+        padding: 1.25rem;
+        border-left: 4px solid #667eea;
         margin: 1rem 0;
-        box-shadow: 0 8px 25px rgba(240,147,251,0.3);
     }
     
-    .report-content {
-        background: white;
-        color: #2d3436;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin-top: 1rem;
-        box-shadow: inset 0 2px 10px rgba(0,0,0,0.1);
+    .assessment-container {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 1.25rem;
+        border-left: 4px solid #74b9ff;
+        margin: 1rem 0;
     }
     
-    /* Button Styling */
     .stButton > button {
-        border-radius: 25px !important;
+        border-radius: 8px !important;
         border: none !important;
-        padding: 0.6rem 1.5rem !important;
-        font-weight: 600 !important;
-        transition: all 0.3s ease !important;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1) !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+        height: 2.75rem !important;
     }
     
     .stButton > button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 6px 20px rgba(0,0,0,0.15) !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12) !important;
     }
     
-    /* Download Button */
-    .download-section {
-        background: linear-gradient(135deg, #74b9ff, #0984e3);
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        text-align: center;
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #667eea, #764ba2) !important;
+        color: white !important;
     }
     
-    /* Language Selector */
-    .language-selector {
-        background: white;
-        border-radius: 10px;
-        padding: 1rem;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        border: 2px solid #e1e8ed;
-    }
-    
-    /* Metrics */
-    .metric-card {
-        background: linear-gradient(135deg, #a29bfe, #6c5ce7);
-        color: white;
-        padding: 1rem;
-        border-radius: 10px;
-        text-align: center;
-        margin: 0.5rem 0;
-        box-shadow: 0 4px 15px rgba(162,155,254,0.3);
-    }
-    
-    /* Expander Styling */
-    .streamlit-expanderHeader {
+    .stButton > button[kind="secondary"] {
         background: #f8f9fa !important;
-        border-radius: 8px !important;
-        border: 1px solid #e9ecef !important;
+        color: #495057 !important;
+        border: 1px solid #dee2e6 !important;
     }
     
-    /* Text Area Styling */
-    .stTextArea > div > div > textarea {
-        border-radius: 10px !important;
-        border: 2px solid #e1e8ed !important;
-        font-family: 'Inter', sans-serif !important;
-    }
-    
-    .stTextArea > div > div > textarea:focus {
-        border-color: #667eea !important;
-        box-shadow: 0 0 0 3px rgba(102,126,234,0.1) !important;
-    }
-    
-    /* Selectbox Styling */
-    .stSelectbox > div > div > select {
-        border-radius: 10px !important;
-        border: 2px solid #e1e8ed !important;
-        font-weight: 500 !important;
-    }
-    
-    /* Success/Error Messages */
-    .stSuccess {
-        background: linear-gradient(135deg, #00b894, #00a085) !important;
-        border-radius: 10px !important;
-        border: none !important;
-    }
-    
-    .stError {
-        background: linear-gradient(135deg, #e17055, #d63031) !important;
-        border-radius: 10px !important;
-        border: none !important;
-    }
-    
-    .stWarning {
-        background: linear-gradient(135deg, #fdcb6e, #e17055) !important;
-        border-radius: 10px !important;
-        border: none !important;
-    }
-    
-    /* Sidebar Styling */
-    .css-1d391kg {
-        background: linear-gradient(180deg, #667eea 0%, #764ba2 100%) !important;
-    }
-    
-    /* Hide Streamlit Branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
     </style>
     """, unsafe_allow_html=True)
     
-    # Main Header
+    # App Header
     st.markdown("""
-    <div class="main-header">
-        <h1 class="main-title">🏥 Daease Assistant</h1>
-        <p class="main-subtitle">AI-Powered Real-time Medical Conversation Analysis</p>
+    <div class="app-header">
+        <h1 class="app-title">🏥 Medical Voice Transcriber</h1>
+        <p class="app-subtitle">AI-Powered Medical Conversation Analysis (Cloud Version)</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Initialize session state variables
-    if 'selected_language' not in st.session_state:
-        st.session_state.selected_language = "English (US)"
-    if 'transcriber' not in st.session_state:
-        st.session_state.transcriber = None
-    if 'is_recording' not in st.session_state:
-        st.session_state.is_recording = False
+    # Initialize session state
     if 'current_transcript' not in st.session_state:
-        st.session_state.current_transcript = []
+        st.session_state.current_transcript = ""
     if 'medical_report' not in st.session_state:
         st.session_state.medical_report = None
-    if 'last_recording_id' not in st.session_state:
-        st.session_state.last_recording_id = None
-    if 'generating_report' not in st.session_state:
-        st.session_state.generating_report = False
-    if 'pdf_data' not in st.session_state:
-        st.session_state.pdf_data = None
     if 'ai_assessment' not in st.session_state:
         st.session_state.ai_assessment = None
-    if 'generating_assessment' not in st.session_state:
-        st.session_state.generating_assessment = False
+    if 'last_transcription_id' not in st.session_state:
+        st.session_state.last_transcription_id = None
     
-    # Language selection
-    col1, col2, col3, col4 = st.columns([1.5, 1, 1, 2])
+    # Main content
+    col_left, col_right = st.columns([3, 2])
     
-    # Control Panel
-    st.markdown('<div class="control-panel">', unsafe_allow_html=True)
-    
-    control_col1, control_col2, control_col3, control_col4 = st.columns([2, 1.5, 1.5, 3])
-    
-    with control_col1:
-        st.markdown('<div class="language-selector">', unsafe_allow_html=True)
-        st.markdown("**🌐 Language Selection**")
-        selected_language = st.selectbox(
-            "",
-            options=list(SUPPORTED_LANGUAGES.keys()),
-            index=list(SUPPORTED_LANGUAGES.keys()).index(st.session_state.selected_language),
-            key="language_select"
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+    with col_left:
+        # Input Section
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-header">📝 Input Method</div>', unsafe_allow_html=True)
         
-        if selected_language != st.session_state.selected_language:
-            st.session_state.selected_language = selected_language
-            st.session_state.transcriber = None
-            st.experimental_rerun()
-    
-    # Initialize transcriber if needed
-    if st.session_state.transcriber is None:
-        st.session_state.transcriber = AudioTranscriber(
-            "daease-transcription-4f98056e2b9c.json",
-            language_code=SUPPORTED_LANGUAGES[selected_language]
-        )
-    
-    # Load existing transcriptions
-    _, transcriptions = load_transcription_counter()
-    
-    with control_col2:
-        if st.button("🎙️ Start Recording", disabled=st.session_state.is_recording, type="primary", key="start_btn"):
-            st.session_state.transcriber.start_recording()
-            st.session_state.is_recording = True
-            st.session_state.current_transcript = []
-            st.session_state.medical_report = None
-            st.session_state.generating_report = False
-            st.session_state.pdf_data = None
-            st.session_state.ai_assessment = None
-            st.session_state.generating_assessment = False
-            st.experimental_rerun()
-    
-    with control_col3:
-        if st.button("⏹️ Stop Recording", disabled=not st.session_state.is_recording, type="secondary", key="stop_btn"):
-            counter, session_transcript = st.session_state.transcriber.stop_recording()
-            st.session_state.is_recording = False
-            
-            if counter is not None and session_transcript:
-                st.session_state.current_transcript = session_transcript
-                st.session_state.medical_report = generate_medical_report("\n".join(session_transcript))
-                st.session_state.last_recording_id = counter
-                st.session_state.generating_report = True
-                st.session_state.pdf_data = create_pdf_report(st.session_state.medical_report, "\n".join(session_transcript), counter)
-                st.session_state.ai_assessment = None
-                st.session_state.generating_assessment = False
-                st.success(f"✅ Recording saved (ID: {counter})")
-            else:
-                st.warning("⚠️ No speech detected in this recording. Please try speaking louder or closer to the microphone.")
-                st.session_state.current_transcript = []
-                st.session_state.medical_report = None
-                st.session_state.last_recording_id = None
-                st.session_state.generating_report = False
-                st.session_state.pdf_data = None
-                st.session_state.ai_assessment = None
-                st.session_state.generating_assessment = False
-            
-            st.experimental_rerun()
-    
-    with control_col4:
-        if st.session_state.is_recording:
-            st.markdown("""
-            <div class="status-recording">
-                🔴 Recording in Progress...
-                <br><small>Listening for medical conversation</small>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div class="status-idle">
-                ⚪ Ready to Record
-                <br><small>Click Start Recording to begin</small>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Create two columns for transcript and history
-    transcript_col, history_col = st.columns([3, 2])
-    
-    with transcript_col:
-        st.markdown('<div class="transcript-card">', unsafe_allow_html=True)
-        st.markdown(f"### 🎤 Live Transcription ({selected_language})")
+        # Input tabs
+        tab1, tab2 = st.tabs(["📁 Upload Audio File", "✍️ Text Input"])
         
-        # Show current or last session transcript
-        if st.session_state.is_recording:
-            # Show live transcription
-            current_text = st.session_state.transcriber.get_current_display_text()
-            if current_text:
-                st.text_area("🔊 Live Transcript", current_text, height=150, key="live_transcript")
-            else:
-                st.info("🎧 Listening... Please speak into your microphone.")
+        with tab1:
+            st.markdown("**Upload an audio file for transcription**")
+            
+            # Language selection
+            selected_language = st.selectbox(
+                "Select Language",
+                options=list(SUPPORTED_LANGUAGES.keys()),
+                index=0
+            )
+            
+            # File upload
+            uploaded_file = st.file_uploader(
+                "Choose an audio file",
+                type=['wav', 'mp3', 'm4a', 'flac'],
+                help="Supported formats: WAV, MP3, M4A, FLAC"
+            )
+            
+            if uploaded_file is not None:
+                st.audio(uploaded_file, format='audio/wav')
                 
-        elif st.session_state.current_transcript:
-            st.markdown("### 📝 Current Session Transcript")
-            st.text_area("Session Transcript", "\n".join(st.session_state.current_transcript), height=200, key="current_session")
+                if st.button("🎤 Transcribe Audio", type="primary", use_container_width=True):
+                    with st.spinner("🤖 Transcribing audio..."):
+                        language_code = SUPPORTED_LANGUAGES[selected_language]
+                        transcript = transcribe_audio_file(uploaded_file, language_code)
+                        
+                        if transcript:
+                            st.session_state.current_transcript = transcript
+                            # Save transcription
+                            transcription_id = save_transcription(transcript, language_code)
+                            st.session_state.last_transcription_id = transcription_id
+                            st.success(f"✅ Transcription completed! (ID: {transcription_id})")
+                        else:
+                            st.error("❌ Failed to transcribe audio")
+        
+        with tab2:
+            st.markdown("**Enter or paste text directly**")
             
-            # Medical Report Generation Section
+            text_input = st.text_area(
+                "Medical Conversation Text",
+                height=200,
+                placeholder="Enter the medical conversation text here...",
+                help="Paste or type the medical conversation you want to analyze"
+            )
+            
+            if st.button("📝 Use This Text", type="primary", use_container_width=True):
+                if text_input.strip():
+                    st.session_state.current_transcript = text_input.strip()
+                    # Save transcription
+                    transcription_id = save_transcription(text_input.strip(), "manual-input")
+                    st.session_state.last_transcription_id = transcription_id
+                    st.success(f"✅ Text saved! (ID: {transcription_id})")
+                else:
+                    st.warning("⚠️ Please enter some text")
+        
+        # Display current transcript
+        if st.session_state.current_transcript:
             st.markdown("---")
-            st.markdown("### 🏥 Medical Analysis & Assessment")
+            st.markdown('<div class="card-header">📄 Current Transcript</div>', unsafe_allow_html=True)
+            st.text_area(
+                "Transcript",
+                st.session_state.current_transcript,
+                height=150,
+                label_visibility="collapsed"
+            )
             
-            col_report1, col_report2, col_report3, col_report4 = st.columns([1, 1, 1, 1])
+            # Analysis buttons
+            st.markdown("---")
+            st.markdown('<div class="card-header">🏥 AI Analysis</div>', unsafe_allow_html=True)
             
-            with col_report1:
-                if st.button("🏥 Generate Medical Report", type="primary", disabled=st.session_state.generating_report, key="generate_report"):
-                    with st.spinner("🤖 Generating medical report using AI..."):
-                        st.session_state.generating_report = True
-                        transcript_text = "\n".join(st.session_state.current_transcript)
-                        st.session_state.medical_report = generate_medical_report(transcript_text)
-                        
+            analysis_col1, analysis_col2, analysis_col3 = st.columns([1, 1, 1])
+            
+            with analysis_col1:
+                if st.button("📋 Medical Report", type="primary", use_container_width=True):
+                    with st.spinner("🤖 Generating report..."):
+                        st.session_state.medical_report = generate_medical_report(st.session_state.current_transcript)
                         if st.session_state.medical_report:
-                            # Create PDF
-                            st.session_state.pdf_data = create_pdf_report(
-                                st.session_state.medical_report, 
-                                transcript_text, 
-                                st.session_state.last_recording_id
-                            )
-                            st.success("✅ Medical report generated successfully!")
+                            st.success("✅ Report generated!")
                         else:
-                            st.error("❌ Failed to generate medical report")
-                        
-                        st.session_state.generating_report = False
-                        st.experimental_rerun()
+                            st.error("❌ Generation failed")
             
-            with col_report2:
-                if st.button("🩺 Generate AI Assessment", type="primary", disabled=st.session_state.generating_assessment, key="generate_assessment"):
-                    with st.spinner("🧠 Generating AI medical assessment..."):
-                        st.session_state.generating_assessment = True
-                        transcript_text = "\n".join(st.session_state.current_transcript)
-                        st.session_state.ai_assessment = generate_ai_assessment(transcript_text)
-                        
+            with analysis_col2:
+                if st.button("🩺 AI Assessment", type="primary", use_container_width=True):
+                    with st.spinner("🧠 Generating assessment..."):
+                        st.session_state.ai_assessment = generate_ai_assessment(st.session_state.current_transcript)
                         if st.session_state.ai_assessment:
-                            st.success("✅ AI assessment generated successfully!")
+                            st.success("✅ Assessment generated!")
                         else:
-                            st.error("❌ Failed to generate AI assessment")
-                        
-                        st.session_state.generating_assessment = False
-                        st.experimental_rerun()
+                            st.error("❌ Generation failed")
             
-            with col_report3:
-                if st.session_state.medical_report and st.session_state.pdf_data:
-                    filename = f"medical_report_{st.session_state.last_recording_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                    st.download_button(
-                        label="📄 Download PDF Report",
-                        data=st.session_state.pdf_data,
-                        file_name=filename,
-                        mime="application/pdf",
-                        type="secondary",
-                        key="download_pdf"
-                    )
-            
-            with col_report4:
+            with analysis_col3:
                 if st.session_state.medical_report or st.session_state.ai_assessment:
-                    if st.button("🗂️ Save to Folder", key="save_folder"):
-                        try:
-                            # Save text report
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            text_filename = f"medical_reports/medical_report_transcription_{st.session_state.last_recording_id}_{timestamp}.txt"
-                            os.makedirs("medical_reports", exist_ok=True)
-                            
-                            with open(text_filename, 'w', encoding='utf-8') as f:
-                                f.write(f"Medical Analysis - Transcription #{st.session_state.last_recording_id}\n")
-                                f.write("=" * 60 + "\n\n")
-                                
-                                if st.session_state.medical_report:
-                                    f.write("MEDICAL REPORT:\n")
-                                    f.write("-" * 40 + "\n")
-                                    f.write(st.session_state.medical_report)
-                                    f.write("\n\n")
-                                
-                                if st.session_state.ai_assessment:
-                                    f.write("AI MEDICAL ASSESSMENT:\n")
-                                    f.write("-" * 40 + "\n")
-                                    f.write(st.session_state.ai_assessment)
-                                    f.write("\n\n")
-                                
-                                f.write("=" * 60 + "\n")
-                                f.write("ORIGINAL TRANSCRIPT:\n")
-                                f.write("\n".join(st.session_state.current_transcript))
-                            
-                            # Save PDF report
-                            if st.session_state.pdf_data:
-                                pdf_filename = f"medical_reports/medical_report_transcription_{st.session_state.last_recording_id}_{timestamp}.pdf"
-                                with open(pdf_filename, 'wb') as f:
-                                    f.write(st.session_state.pdf_data)
-                            
-                            st.success(f"💾 Reports saved to medical_reports folder!")
-                        except Exception as e:
-                            st.error(f"❌ Error saving reports: {str(e)}")
+                    with st.popover("⚙️ Actions", use_container_width=True):
+                        if st.session_state.medical_report:
+                            pdf_data = create_pdf_report(
+                                st.session_state.medical_report,
+                                st.session_state.current_transcript,
+                                st.session_state.last_transcription_id
+                            )
+                            if pdf_data:
+                                filename = f"medical_report_{st.session_state.last_transcription_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                                st.download_button(
+                                    label="📄 Download PDF",
+                                    data=pdf_data,
+                                    file_name=filename,
+                                    mime="application/pdf",
+                                    use_container_width=True
+                                )
             
-            # Display Medical Report and AI Assessment
+            # Display results
             if st.session_state.medical_report or st.session_state.ai_assessment:
                 st.markdown("---")
                 
-                # Create tabs for different analyses
                 if st.session_state.medical_report and st.session_state.ai_assessment:
-                    tab1, tab2, tab3 = st.tabs(["📋 Medical Report", "🩺 AI Assessment", "📊 Combined Analysis"])
+                    tab1, tab2 = st.tabs(["📋 Medical Report", "🩺 AI Assessment"])
                     
                     with tab1:
-                        st.markdown("""
-                        <div class="medical-report">
-                            <h3 style="margin: 0; color: white;">🏥 Generated Medical Report</h3>
-                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Structured Clinical Documentation</p>
-                            <div class="report-content">
-                        """, unsafe_allow_html=True)
+                        st.markdown('<div class="report-container">', unsafe_allow_html=True)
                         st.markdown(st.session_state.medical_report)
-                        st.markdown("</div></div>", unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
                     
                     with tab2:
-                        st.markdown("""
-                        <div style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 2rem; border-radius: 15px; margin: 1rem 0; box-shadow: 0 8px 25px rgba(116,185,255,0.3);">
-                            <h3 style="margin: 0; color: white;">🩺 AI Medical Assessment</h3>
-                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Disease Analysis, Severity & Next Steps</p>
-                            <div class="report-content">
-                        """, unsafe_allow_html=True)
+                        st.markdown('<div class="assessment-container">', unsafe_allow_html=True)
                         st.markdown(st.session_state.ai_assessment)
-                        st.markdown("</div></div>", unsafe_allow_html=True)
-                    
-                    with tab3:
-                        st.markdown("### 📊 Combined Medical Analysis")
-                        
-                        # Side-by-side comparison
-                        comp_col1, comp_col2 = st.columns(2)
-                        
-                        with comp_col1:
-                            st.markdown("#### 📋 Clinical Report Summary")
-                            # Extract key points from medical report
-                            report_lines = st.session_state.medical_report.split('\n')
-                            key_sections = [line for line in report_lines if line.startswith('##')]
-                            if key_sections:
-                                for section in key_sections[:5]:  # Show first 5 sections
-                                    st.markdown(f"**{section.replace('##', '').strip()}**")
-                        
-                        with comp_col2:
-                            st.markdown("#### 🩺 AI Assessment Summary")
-                            # Extract key points from AI assessment
-                            assessment_lines = st.session_state.ai_assessment.split('\n')
-                            key_points = [line for line in assessment_lines if line.startswith('##')]
-                            if key_points:
-                                for point in key_points[:5]:  # Show first 5 sections
-                                    st.markdown(f"**{point.replace('##', '').strip()}**")
+                        st.markdown('</div>', unsafe_allow_html=True)
                 
                 elif st.session_state.medical_report:
-                    st.markdown("""
-                    <div class="medical-report">
-                        <h3 style="margin: 0; color: white;">🏥 Generated Medical Report</h3>
-                        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">AI-Powered Analysis using Google Cloud Vertex AI</p>
-                        <div class="report-content">
-                    """, unsafe_allow_html=True)
+                    st.markdown("#### 📋 Medical Report")
+                    st.markdown('<div class="report-container">', unsafe_allow_html=True)
                     st.markdown(st.session_state.medical_report)
-                    st.markdown("</div></div>", unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
                 
                 elif st.session_state.ai_assessment:
-                    st.markdown("""
-                    <div style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 2rem; border-radius: 15px; margin: 1rem 0; box-shadow: 0 8px 25px rgba(116,185,255,0.3);">
-                        <h3 style="margin: 0; color: white;">🩺 AI Medical Assessment</h3>
-                        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Disease Analysis, Severity & Next Steps</p>
-                        <div class="report-content">
-                    """, unsafe_allow_html=True)
+                    st.markdown("#### 🩺 AI Assessment")
+                    st.markdown('<div class="assessment-container">', unsafe_allow_html=True)
                     st.markdown(st.session_state.ai_assessment)
-                    st.markdown("</div></div>", unsafe_allow_html=True)
-                
-                # Show report metadata
-                with st.expander("📊 Analysis Details & Metadata"):
-                    meta_col1, meta_col2, meta_col3 = st.columns(3)
-                    with meta_col1:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <strong>Transcription ID</strong><br>
-                            #{st.session_state.last_recording_id}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <strong>AI Model</strong><br>
-                            Gemini 2.5 Flash
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with meta_col2:
-                        if st.session_state.medical_report:
-                            st.markdown(f"""
-                            <div class="metric-card">
-                                <strong>Report Word Count</strong><br>
-                                {len(st.session_state.medical_report.split())} words
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        if st.session_state.ai_assessment:
-                            st.markdown(f"""
-                            <div class="metric-card">
-                                <strong>Assessment Word Count</strong><br>
-                                {len(st.session_state.ai_assessment.split())} words
-                            </div>
-                            """, unsafe_allow_html=True)
-                    
-                    with meta_col3:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <strong>Source Length</strong><br>
-                            {len(' '.join(st.session_state.current_transcript).split())} words
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        analyses_generated = []
-                        if st.session_state.medical_report:
-                            analyses_generated.append("Medical Report")
-                        if st.session_state.ai_assessment:
-                            analyses_generated.append("AI Assessment")
-                        
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <strong>Analyses Generated</strong><br>
-                            {', '.join(analyses_generated)}
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.write(f"**Generated at:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                    st.write(f"**Processing Platform:** Google Cloud Vertex AI")
-                    st.write(f"**Analysis Types:** {', '.join(analyses_generated) if analyses_generated else 'None'}")
-        elif st.session_state.last_recording_id and str(st.session_state.last_recording_id) in transcriptions:
-            last_recording = transcriptions[str(st.session_state.last_recording_id)]
-            st.markdown("### 📋 Last Session Transcript")
-            st.text_area("Session Transcript", "\n".join(last_recording['session_transcript']), height=200, key="last_session")
-        else:
-            st.info("🎙️ No transcription available. Start recording to begin.")
-            
+                    st.markdown('</div>', unsafe_allow_html=True)
+        
         st.markdown('</div>', unsafe_allow_html=True)
     
-    with history_col:
-        st.markdown('<div class="history-card">', unsafe_allow_html=True)
-        st.markdown("### 📚 Transcription History")
+    with col_right:
+        # History Section
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-header">📚 Transcription History</div>', unsafe_allow_html=True)
+        
+        _, transcriptions = load_transcription_counter()
         
         if transcriptions:
-            # Show summary stats
+            # Summary metrics
             total_transcriptions = len(transcriptions)
             total_words = sum(data.get('word_count', 0) for data in transcriptions.values())
             
-            stats_col1, stats_col2 = st.columns(2)
-            with stats_col1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <strong>{total_transcriptions}</strong><br>
-                    Total Sessions
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with stats_col2:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <strong>{total_words:,}</strong><br>
-                    Total Words
-                </div>
-                """, unsafe_allow_html=True)
+            metric_col1, metric_col2 = st.columns(2)
+            with metric_col1:
+                st.metric("Total Sessions", total_transcriptions)
+            with metric_col2:
+                st.metric("Total Words", f"{total_words:,}")
             
             st.markdown("---")
             
+            # History list
             sorted_transcriptions = sorted(transcriptions.items(), key=lambda x: int(x[0]), reverse=True)
-            for counter, data in sorted_transcriptions:
-                # Create a more compact and styled expander
-                duration = data.get('duration_seconds', 0)
-                duration_str = f"{duration:.1f}s" if duration else "N/A"
-                language_flag = "🇺🇸" if data.get('language') == 'en-US' else "🇮🇳" if data.get('language') in ['hi-IN', 'en-IN'] else "🌐"
+            for counter, data in sorted_transcriptions[:10]:  # Show last 10
+                language_flag = "🇺🇸" if data.get('language') == 'en-US' else "🇮🇳" if data.get('language') in ['hi-IN', 'en-IN'] else "📝" if data.get('language') == 'manual-input' else "🌐"
                 
-                with st.expander(f"📝 #{counter} • {data['timestamp'][:10]} • {language_flag} {data.get('language', 'Unknown')}"):
-                    # Session details
-                    detail_col1, detail_col2 = st.columns(2)
-                    with detail_col1:
-                        st.markdown(f"**⏱️ Duration:** {duration_str}")
-                        st.markdown(f"**📊 Words:** {data['word_count']}")
-                    with detail_col2:
-                        st.markdown(f"**🕐 Time:** {data['timestamp'][11:]}")
-                        st.markdown(f"**🌐 Language:** {data.get('language', 'Unknown')}")
+                with st.expander(f"#{counter} • {data['timestamp'][:16]} • {language_flag}", expanded=False):
+                    # Session info
+                    info_col1, info_col2 = st.columns(2)
+                    with info_col1:
+                        st.caption(f"📊 {data['word_count']} words")
+                    with info_col2:
+                        lang_display = "Manual Input" if data.get('language') == 'manual-input' else data.get('language', 'Unknown')
+                        st.caption(f"🌐 {lang_display}")
                     
                     # Transcript preview
-                    transcript_text = "\n".join(data['session_transcript'])
-                    if len(transcript_text) > 200:
-                        preview_text = transcript_text[:200] + "..."
-                        st.markdown(f"**Preview:** {preview_text}")
+                    transcript_text = data.get('transcript', '')
+                    if transcript_text:
+                        if len(transcript_text) > 150:
+                            st.text(transcript_text[:150] + "...")
+                            if st.button(f"👁️ View Full", key=f"view_{counter}", use_container_width=True):
+                                st.text_area("Full Transcript", transcript_text, height=120, key=f"full_{counter}")
+                        else:
+                            st.text(transcript_text)
                         
-                        if st.button(f"👁️ View Full Transcript", key=f"view_full_{counter}"):
-                            st.text_area("Full Transcript", transcript_text, height=150, key=f"full_transcript_{counter}")
+                        # Quick actions
+                        action_col1, action_col2 = st.columns(2)
+                        with action_col1:
+                            if st.button(f"📋 Report", key=f"report_{counter}", use_container_width=True):
+                                with st.spinner("Generating..."):
+                                    report = generate_medical_report(transcript_text)
+                                    if report:
+                                        st.success("Generated!")
+                                        with st.expander("Medical Report", expanded=True):
+                                            st.markdown(report)
+                        
+                        with action_col2:
+                            if st.button(f"🩺 Assessment", key=f"assess_{counter}", use_container_width=True):
+                                with st.spinner("Generating..."):
+                                    assessment = generate_ai_assessment(transcript_text)
+                                    if assessment:
+                                        st.success("Generated!")
+                                        with st.expander("AI Assessment", expanded=True):
+                                            st.markdown(assessment)
                     else:
-                        st.text_area("Transcript", transcript_text, height=100, key=f"transcript_{counter}")
-                    
-                    # Action buttons for each transcription
-                    action_col1, action_col2, action_col3 = st.columns(3)
-                    with action_col1:
-                        if st.button(f"🏥 Generate Report", key=f"gen_report_{counter}"):
-                            with st.spinner("Generating report..."):
-                                report = generate_medical_report(transcript_text)
-                                if report:
-                                    st.success("Report generated!")
-                                    st.markdown("**Generated Report:**")
-                                    st.markdown(report)
-                                else:
-                                    st.error("Failed to generate report")
-                    
-                    with action_col2:
-                        if st.button(f"🩺 AI Assessment", key=f"gen_assessment_{counter}"):
-                            with st.spinner("Generating AI assessment..."):
-                                assessment = generate_ai_assessment(transcript_text)
-                                if assessment:
-                                    st.success("AI assessment generated!")
-                                    st.markdown("**AI Medical Assessment:**")
-                                    st.markdown(assessment)
-                                else:
-                                    st.error("Failed to generate AI assessment")
-                    
-                    with action_col3:
-                        if transcript_text and st.button(f"📄 Download PDF", key=f"download_{counter}"):
-                            with st.spinner("Creating PDF..."):
-                                pdf_data = create_pdf_report(None, transcript_text, counter)
-                                if pdf_data:
-                                    filename = f"transcript_{counter}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                                    st.download_button(
-                                        label="📥 Download",
-                                        data=pdf_data,
-                                        file_name=filename,
-                                        mime="application/pdf",
-                                        key=f"dl_btn_{counter}"
-                                    )
+                        st.caption("No transcript content")
         else:
-            st.markdown("""
-            <div style="text-align: center; padding: 2rem; color: #6c757d;">
-                <h4>📭 No Previous Transcriptions</h4>
-                <p>Start recording to create your first medical transcription!</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.info("📭 No transcriptions yet. Upload an audio file or enter text to get started!")
             
         st.markdown('</div>', unsafe_allow_html=True)
-
-    # Update transcription display for live recording
-    if st.session_state.is_recording:
-        try:
-            # Process any new transcription updates
-            updates_processed = 0
-            while updates_processed < 10:  # Limit to prevent infinite loop
-                try:
-                    status, text = st.session_state.transcriber.transcript_queue.get_nowait()
-                    if status == "final":
-                        # Final transcript is already added to current_session in the transcriber
-                        pass
-                    updates_processed += 1
-                except queue.Empty:
-                    break
-            
-            # Refresh the display every few seconds during recording
-            time.sleep(0.5)
-            st.experimental_rerun()
-        except Exception as e:
-            print(f"Error updating display: {str(e)}")  # Debug print
 
 if __name__ == "__main__":
     main() 

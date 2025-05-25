@@ -1,6 +1,7 @@
-streamlit==1.32.0
-google-cloud-speech==2.24.1
-pyaudio==0.2.14
-python-dotenv==1.0.1
-google-cloud-aiplatform>=1.38.0
-reportlab>=4.0.0 
+streamlit>=1.28.0
+google-cloud-speech>=2.21.0
+google-oauth2-tool>=0.0.3
+google-auth>=2.22.0
+google-cloud-aiplatform>=1.34.0
+reportlab>=4.0.4
+Pillow>=10.0.0 
