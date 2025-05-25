@@ -11,6 +11,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
 import base64
+import streamlit.components.v1 as components
 
 # Transcription storage settings
 TRANSCRIPTIONS_DIR = "transcriptions"
@@ -96,11 +97,29 @@ def transcribe_audio_file(audio_file, language_code):
         # Read audio file
         audio_content = audio_file.read()
         
+        # Determine encoding based on file type
+        file_name = audio_file.name.lower()
+        if file_name.endswith('.webm'):
+            encoding = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS
+            sample_rate = 48000
+        elif file_name.endswith('.mp3'):
+            encoding = speech.RecognitionConfig.AudioEncoding.MP3
+            sample_rate = 44100
+        elif file_name.endswith('.flac'):
+            encoding = speech.RecognitionConfig.AudioEncoding.FLAC
+            sample_rate = 44100
+        elif file_name.endswith('.m4a'):
+            encoding = speech.RecognitionConfig.AudioEncoding.MP3  # M4A often works with MP3 encoding
+            sample_rate = 44100
+        else:  # Default to LINEAR16 for WAV files
+            encoding = speech.RecognitionConfig.AudioEncoding.LINEAR16
+            sample_rate = 16000
+        
         # Configure recognition
         audio = speech.RecognitionAudio(content=audio_content)
         config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=16000,
+            encoding=encoding,
+            sample_rate_hertz=sample_rate,
             language_code=language_code,
             enable_automatic_punctuation=True,
         )
@@ -232,6 +251,161 @@ def create_pdf_report(report_text, transcript_text, transcription_id=None):
     except Exception as e:
         st.error(f"Error creating PDF: {str(e)}")
         return None
+
+def get_audio_recorder_component():
+    """Return the HTML/JS component for browser-based audio recording"""
+    return """
+    <div id="audio-recorder" style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 12px; margin: 10px 0;">
+        <div id="recorder-status" style="margin-bottom: 15px; font-weight: 500; color: #495057;">
+            🎤 Ready to record
+        </div>
+        
+        <div style="margin-bottom: 15px;">
+            <button id="start-btn" onclick="startRecording()" 
+                    style="background: linear-gradient(135deg, #28a745, #20c997); color: white; border: none; 
+                           padding: 12px 24px; border-radius: 8px; font-weight: 500; margin: 5px; cursor: pointer;
+                           box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);">
+                🔴 Start Recording
+            </button>
+            
+            <button id="stop-btn" onclick="stopRecording()" disabled
+                    style="background: linear-gradient(135deg, #dc3545, #c82333); color: white; border: none; 
+                           padding: 12px 24px; border-radius: 8px; font-weight: 500; margin: 5px; cursor: pointer;
+                           box-shadow: 0 2px 8px rgba(220, 53, 69, 0.3);">
+                ⏹️ Stop Recording
+            </button>
+        </div>
+        
+        <div id="recording-time" style="font-size: 18px; font-weight: 600; color: #667eea; margin-bottom: 10px;">
+            00:00
+        </div>
+        
+        <audio id="audio-playback" controls style="width: 100%; max-width: 400px; margin-top: 10px; display: none;"></audio>
+        
+        <div id="download-section" style="margin-top: 15px; display: none;">
+            <a id="download-link" download="recorded_audio.webm" style="text-decoration: none;">
+                <button style="background: linear-gradient(135deg, #667eea, #764ba2); color: white; border: none; 
+                               padding: 12px 24px; border-radius: 8px; font-weight: 500; cursor: pointer;
+                               box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);">
+                    💾 Download Recording
+                </button>
+            </a>
+            <div style="margin-top: 10px; font-size: 14px; color: #6c757d;">
+                Download the recording and upload it using the "Upload Audio File" tab
+            </div>
+        </div>
+    </div>
+
+    <script>
+    let mediaRecorder;
+    let audioChunks = [];
+    let recordingStartTime;
+    let timerInterval;
+    let stream;
+
+    async function startRecording() {
+        try {
+            // Request microphone access
+            stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    sampleRate: 16000,
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                } 
+            });
+            
+            // Create MediaRecorder
+            mediaRecorder = new MediaRecorder(stream, {
+                mimeType: 'audio/webm;codecs=opus'
+            });
+            
+            audioChunks = [];
+            
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+            
+            mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                
+                const audioPlayback = document.getElementById('audio-playback');
+                audioPlayback.src = audioUrl;
+                audioPlayback.style.display = 'block';
+                
+                // Create download link
+                const downloadLink = document.getElementById('download-link');
+                downloadLink.href = audioUrl;
+                document.getElementById('download-section').style.display = 'block';
+            };
+            
+            // Start recording
+            mediaRecorder.start(1000); // Collect data every second
+            recordingStartTime = Date.now();
+            
+            // Update UI
+            document.getElementById('start-btn').disabled = true;
+            document.getElementById('stop-btn').disabled = false;
+            document.getElementById('recorder-status').innerHTML = '🔴 Recording in progress...';
+            document.getElementById('recorder-status').style.color = '#dc3545';
+            
+            // Start timer
+            timerInterval = setInterval(updateTimer, 1000);
+            
+        } catch (error) {
+            console.error('Error starting recording:', error);
+            document.getElementById('recorder-status').innerHTML = '❌ Microphone access denied or not available';
+            document.getElementById('recorder-status').style.color = '#dc3545';
+        }
+    }
+
+    function stopRecording() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+            
+            // Stop all tracks
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+            
+            // Update UI
+            document.getElementById('start-btn').disabled = false;
+            document.getElementById('stop-btn').disabled = true;
+            document.getElementById('recorder-status').innerHTML = '✅ Recording completed - Download and upload using the Upload tab';
+            document.getElementById('recorder-status').style.color = '#28a745';
+            
+            // Stop timer
+            clearInterval(timerInterval);
+        }
+    }
+
+    function updateTimer() {
+        const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+        const minutes = Math.floor(elapsed / 60);
+        const seconds = elapsed % 60;
+        document.getElementById('recording-time').textContent = 
+            `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    // Reset function
+    function resetRecorder() {
+        document.getElementById('start-btn').disabled = false;
+        document.getElementById('stop-btn').disabled = true;
+        document.getElementById('recorder-status').innerHTML = '🎤 Ready to record';
+        document.getElementById('recorder-status').style.color = '#495057';
+        document.getElementById('recording-time').textContent = '00:00';
+        document.getElementById('audio-playback').style.display = 'none';
+        document.getElementById('download-section').style.display = 'none';
+        
+        if (timerInterval) {
+            clearInterval(timerInterval);
+        }
+    }
+    </script>
+    """
 
 def main():
     st.set_page_config(
@@ -368,9 +542,22 @@ def main():
         st.markdown('<div class="card-header">📝 Input Method</div>', unsafe_allow_html=True)
         
         # Input tabs
-        tab1, tab2 = st.tabs(["📁 Upload Audio File", "✍️ Text Input"])
+        tab1, tab2, tab3 = st.tabs(["🎤 Record Audio", "📁 Upload Audio File", "✍️ Text Input"])
         
         with tab1:
+            st.markdown("**Record audio directly in your browser**")
+            
+            st.info("🎤 **How to use the recorder:**\n"
+                   "1. Click 'Start Recording' and allow microphone access\n"
+                   "2. Speak your medical conversation\n"
+                   "3. Click 'Stop Recording' when finished\n"
+                   "4. Download the recording\n"
+                   "5. Upload the downloaded file in the 'Upload Audio File' tab")
+            
+            # Audio recorder component
+            components.html(get_audio_recorder_component(), height=350)
+        
+        with tab2:
             st.markdown("**Upload an audio file for transcription**")
             
             # Language selection
@@ -383,8 +570,8 @@ def main():
             # File upload
             uploaded_file = st.file_uploader(
                 "Choose an audio file",
-                type=['wav', 'mp3', 'm4a', 'flac'],
-                help="Supported formats: WAV, MP3, M4A, FLAC"
+                type=['wav', 'mp3', 'm4a', 'flac', 'webm'],
+                help="Supported formats: WAV, MP3, M4A, FLAC, WebM (from browser recorder)"
             )
             
             if uploaded_file is not None:
@@ -404,7 +591,7 @@ def main():
                         else:
                             st.error("❌ Failed to transcribe audio")
         
-        with tab2:
+        with tab3:
             st.markdown("**Enter or paste text directly**")
             
             text_input = st.text_area(
