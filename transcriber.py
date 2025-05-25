@@ -305,6 +305,40 @@ def generate_medical_report(transcript):
         st.error(f"Error generating medical report: {str(e)}")
         return None
 
+def generate_ai_assessment(transcript):
+    """Generate AI medical assessment with disease analysis, severity, and next steps"""
+    try:
+        PROJECT_ID = "daease-transcription"
+        generator = MedicalReportGenerator(
+            project_id=PROJECT_ID, 
+            credentials_path="daease-transcription-4f98056e2b9c.json"
+        )
+        
+        # Generate the AI assessment
+        assessment = generator.generate_ai_assessment(transcript)
+        return assessment
+        
+    except Exception as e:
+        st.error(f"Error generating AI assessment: {str(e)}")
+        return None
+
+def generate_comprehensive_analysis(transcript):
+    """Generate both medical report and AI assessment"""
+    try:
+        PROJECT_ID = "daease-transcription"
+        generator = MedicalReportGenerator(
+            project_id=PROJECT_ID, 
+            credentials_path="daease-transcription-4f98056e2b9c.json"
+        )
+        
+        # Generate comprehensive analysis
+        analysis = generator.generate_comprehensive_analysis(transcript)
+        return analysis
+        
+    except Exception as e:
+        st.error(f"Error generating comprehensive analysis: {str(e)}")
+        return None
+
 def create_pdf_report(report_text, transcript_text, transcription_id=None):
     """Create a PDF report from the medical report text"""
     try:
@@ -385,7 +419,7 @@ def get_pdf_download_link(pdf_data, filename):
 
 def main():
     st.set_page_config(
-        page_title="Medical Voice Transcriber", 
+        page_title="Daease Assistant", 
         layout="wide",
         page_icon="🏥",
         initial_sidebar_state="collapsed"
@@ -608,7 +642,7 @@ def main():
     # Main Header
     st.markdown("""
     <div class="main-header">
-        <h1 class="main-title">🏥 Medical Voice Transcriber</h1>
+        <h1 class="main-title">🏥 Daease Assistant</h1>
         <p class="main-subtitle">AI-Powered Real-time Medical Conversation Analysis</p>
     </div>
     """, unsafe_allow_html=True)
@@ -630,6 +664,10 @@ def main():
         st.session_state.generating_report = False
     if 'pdf_data' not in st.session_state:
         st.session_state.pdf_data = None
+    if 'ai_assessment' not in st.session_state:
+        st.session_state.ai_assessment = None
+    if 'generating_assessment' not in st.session_state:
+        st.session_state.generating_assessment = False
     
     # Language selection
     col1, col2, col3, col4 = st.columns([1.5, 1, 1, 2])
@@ -673,6 +711,8 @@ def main():
             st.session_state.medical_report = None
             st.session_state.generating_report = False
             st.session_state.pdf_data = None
+            st.session_state.ai_assessment = None
+            st.session_state.generating_assessment = False
             st.experimental_rerun()
     
     with control_col3:
@@ -686,6 +726,8 @@ def main():
                 st.session_state.last_recording_id = counter
                 st.session_state.generating_report = True
                 st.session_state.pdf_data = create_pdf_report(st.session_state.medical_report, "\n".join(session_transcript), counter)
+                st.session_state.ai_assessment = None
+                st.session_state.generating_assessment = False
                 st.success(f"✅ Recording saved (ID: {counter})")
             else:
                 st.warning("⚠️ No speech detected in this recording. Please try speaking louder or closer to the microphone.")
@@ -694,6 +736,8 @@ def main():
                 st.session_state.last_recording_id = None
                 st.session_state.generating_report = False
                 st.session_state.pdf_data = None
+                st.session_state.ai_assessment = None
+                st.session_state.generating_assessment = False
             
             st.experimental_rerun()
     
@@ -737,9 +781,9 @@ def main():
             
             # Medical Report Generation Section
             st.markdown("---")
-            st.markdown("### 🏥 Medical Report Generation")
+            st.markdown("### 🏥 Medical Analysis & Assessment")
             
-            col_report1, col_report2, col_report3 = st.columns([1, 1, 1])
+            col_report1, col_report2, col_report3, col_report4 = st.columns([1, 1, 1, 1])
             
             with col_report1:
                 if st.button("🏥 Generate Medical Report", type="primary", disabled=st.session_state.generating_report, key="generate_report"):
@@ -763,6 +807,21 @@ def main():
                         st.experimental_rerun()
             
             with col_report2:
+                if st.button("🩺 Generate AI Assessment", type="primary", disabled=st.session_state.generating_assessment, key="generate_assessment"):
+                    with st.spinner("🧠 Generating AI medical assessment..."):
+                        st.session_state.generating_assessment = True
+                        transcript_text = "\n".join(st.session_state.current_transcript)
+                        st.session_state.ai_assessment = generate_ai_assessment(transcript_text)
+                        
+                        if st.session_state.ai_assessment:
+                            st.success("✅ AI assessment generated successfully!")
+                        else:
+                            st.error("❌ Failed to generate AI assessment")
+                        
+                        st.session_state.generating_assessment = False
+                        st.experimental_rerun()
+            
+            with col_report3:
                 if st.session_state.medical_report and st.session_state.pdf_data:
                     filename = f"medical_report_{st.session_state.last_recording_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
                     st.download_button(
@@ -774,8 +833,8 @@ def main():
                         key="download_pdf"
                     )
             
-            with col_report3:
-                if st.session_state.medical_report:
+            with col_report4:
+                if st.session_state.medical_report or st.session_state.ai_assessment:
                     if st.button("🗂️ Save to Folder", key="save_folder"):
                         try:
                             # Save text report
@@ -784,10 +843,22 @@ def main():
                             os.makedirs("medical_reports", exist_ok=True)
                             
                             with open(text_filename, 'w', encoding='utf-8') as f:
-                                f.write(f"Medical Report - Transcription #{st.session_state.last_recording_id}\n")
+                                f.write(f"Medical Analysis - Transcription #{st.session_state.last_recording_id}\n")
                                 f.write("=" * 60 + "\n\n")
-                                f.write(st.session_state.medical_report)
-                                f.write("\n\n" + "=" * 60 + "\n")
+                                
+                                if st.session_state.medical_report:
+                                    f.write("MEDICAL REPORT:\n")
+                                    f.write("-" * 40 + "\n")
+                                    f.write(st.session_state.medical_report)
+                                    f.write("\n\n")
+                                
+                                if st.session_state.ai_assessment:
+                                    f.write("AI MEDICAL ASSESSMENT:\n")
+                                    f.write("-" * 40 + "\n")
+                                    f.write(st.session_state.ai_assessment)
+                                    f.write("\n\n")
+                                
+                                f.write("=" * 60 + "\n")
                                 f.write("ORIGINAL TRANSCRIPT:\n")
                                 f.write("\n".join(st.session_state.current_transcript))
                             
@@ -801,23 +872,81 @@ def main():
                         except Exception as e:
                             st.error(f"❌ Error saving reports: {str(e)}")
             
-            # Display Medical Report
-            if st.session_state.medical_report:
+            # Display Medical Report and AI Assessment
+            if st.session_state.medical_report or st.session_state.ai_assessment:
                 st.markdown("---")
-                st.markdown("""
-                <div class="medical-report">
-                    <h3 style="margin: 0; color: white;">🏥 Generated Medical Report</h3>
-                    <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">AI-Powered Analysis using Google Cloud Vertex AI</p>
-                    <div class="report-content">
-                """, unsafe_allow_html=True)
                 
-                st.markdown(st.session_state.medical_report)
+                # Create tabs for different analyses
+                if st.session_state.medical_report and st.session_state.ai_assessment:
+                    tab1, tab2, tab3 = st.tabs(["📋 Medical Report", "🩺 AI Assessment", "📊 Combined Analysis"])
+                    
+                    with tab1:
+                        st.markdown("""
+                        <div class="medical-report">
+                            <h3 style="margin: 0; color: white;">🏥 Generated Medical Report</h3>
+                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Structured Clinical Documentation</p>
+                            <div class="report-content">
+                        """, unsafe_allow_html=True)
+                        st.markdown(st.session_state.medical_report)
+                        st.markdown("</div></div>", unsafe_allow_html=True)
+                    
+                    with tab2:
+                        st.markdown("""
+                        <div style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 2rem; border-radius: 15px; margin: 1rem 0; box-shadow: 0 8px 25px rgba(116,185,255,0.3);">
+                            <h3 style="margin: 0; color: white;">🩺 AI Medical Assessment</h3>
+                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Disease Analysis, Severity & Next Steps</p>
+                            <div class="report-content">
+                        """, unsafe_allow_html=True)
+                        st.markdown(st.session_state.ai_assessment)
+                        st.markdown("</div></div>", unsafe_allow_html=True)
+                    
+                    with tab3:
+                        st.markdown("### 📊 Combined Medical Analysis")
+                        
+                        # Side-by-side comparison
+                        comp_col1, comp_col2 = st.columns(2)
+                        
+                        with comp_col1:
+                            st.markdown("#### 📋 Clinical Report Summary")
+                            # Extract key points from medical report
+                            report_lines = st.session_state.medical_report.split('\n')
+                            key_sections = [line for line in report_lines if line.startswith('##')]
+                            if key_sections:
+                                for section in key_sections[:5]:  # Show first 5 sections
+                                    st.markdown(f"**{section.replace('##', '').strip()}**")
+                        
+                        with comp_col2:
+                            st.markdown("#### 🩺 AI Assessment Summary")
+                            # Extract key points from AI assessment
+                            assessment_lines = st.session_state.ai_assessment.split('\n')
+                            key_points = [line for line in assessment_lines if line.startswith('##')]
+                            if key_points:
+                                for point in key_points[:5]:  # Show first 5 sections
+                                    st.markdown(f"**{point.replace('##', '').strip()}**")
                 
-                st.markdown("</div></div>", unsafe_allow_html=True)
+                elif st.session_state.medical_report:
+                    st.markdown("""
+                    <div class="medical-report">
+                        <h3 style="margin: 0; color: white;">🏥 Generated Medical Report</h3>
+                        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">AI-Powered Analysis using Google Cloud Vertex AI</p>
+                        <div class="report-content">
+                    """, unsafe_allow_html=True)
+                    st.markdown(st.session_state.medical_report)
+                    st.markdown("</div></div>", unsafe_allow_html=True)
+                
+                elif st.session_state.ai_assessment:
+                    st.markdown("""
+                    <div style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 2rem; border-radius: 15px; margin: 1rem 0; box-shadow: 0 8px 25px rgba(116,185,255,0.3);">
+                        <h3 style="margin: 0; color: white;">🩺 AI Medical Assessment</h3>
+                        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Disease Analysis, Severity & Next Steps</p>
+                        <div class="report-content">
+                    """, unsafe_allow_html=True)
+                    st.markdown(st.session_state.ai_assessment)
+                    st.markdown("</div></div>", unsafe_allow_html=True)
                 
                 # Show report metadata
-                with st.expander("📊 Report Details & Metadata"):
-                    meta_col1, meta_col2 = st.columns(2)
+                with st.expander("📊 Analysis Details & Metadata"):
+                    meta_col1, meta_col2, meta_col3 = st.columns(3)
                     with meta_col1:
                         st.markdown(f"""
                         <div class="metric-card">
@@ -834,23 +963,46 @@ def main():
                         """, unsafe_allow_html=True)
                     
                     with meta_col2:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <strong>Report Word Count</strong><br>
-                            {len(st.session_state.medical_report.split())} words
-                        </div>
-                        """, unsafe_allow_html=True)
+                        if st.session_state.medical_report:
+                            st.markdown(f"""
+                            <div class="metric-card">
+                                <strong>Report Word Count</strong><br>
+                                {len(st.session_state.medical_report.split())} words
+                            </div>
+                            """, unsafe_allow_html=True)
                         
+                        if st.session_state.ai_assessment:
+                            st.markdown(f"""
+                            <div class="metric-card">
+                                <strong>Assessment Word Count</strong><br>
+                                {len(st.session_state.ai_assessment.split())} words
+                            </div>
+                            """, unsafe_allow_html=True)
+                    
+                    with meta_col3:
                         st.markdown(f"""
                         <div class="metric-card">
                             <strong>Source Length</strong><br>
                             {len(' '.join(st.session_state.current_transcript).split())} words
                         </div>
                         """, unsafe_allow_html=True)
+                        
+                        analyses_generated = []
+                        if st.session_state.medical_report:
+                            analyses_generated.append("Medical Report")
+                        if st.session_state.ai_assessment:
+                            analyses_generated.append("AI Assessment")
+                        
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <strong>Analyses Generated</strong><br>
+                            {', '.join(analyses_generated)}
+                        </div>
+                        """, unsafe_allow_html=True)
                     
                     st.write(f"**Generated at:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     st.write(f"**Processing Platform:** Google Cloud Vertex AI")
-                    
+                    st.write(f"**Analysis Types:** {', '.join(analyses_generated) if analyses_generated else 'None'}")
         elif st.session_state.last_recording_id and str(st.session_state.last_recording_id) in transcriptions:
             last_recording = transcriptions[str(st.session_state.last_recording_id)]
             st.markdown("### 📋 Last Session Transcript")
@@ -917,7 +1069,7 @@ def main():
                         st.text_area("Transcript", transcript_text, height=100, key=f"transcript_{counter}")
                     
                     # Action buttons for each transcription
-                    action_col1, action_col2 = st.columns(2)
+                    action_col1, action_col2, action_col3 = st.columns(3)
                     with action_col1:
                         if st.button(f"🏥 Generate Report", key=f"gen_report_{counter}"):
                             with st.spinner("Generating report..."):
@@ -930,6 +1082,17 @@ def main():
                                     st.error("Failed to generate report")
                     
                     with action_col2:
+                        if st.button(f"🩺 AI Assessment", key=f"gen_assessment_{counter}"):
+                            with st.spinner("Generating AI assessment..."):
+                                assessment = generate_ai_assessment(transcript_text)
+                                if assessment:
+                                    st.success("AI assessment generated!")
+                                    st.markdown("**AI Medical Assessment:**")
+                                    st.markdown(assessment)
+                                else:
+                                    st.error("Failed to generate AI assessment")
+                    
+                    with action_col3:
                         if transcript_text and st.button(f"📄 Download PDF", key=f"download_{counter}"):
                             with st.spinner("Creating PDF..."):
                                 pdf_data = create_pdf_report(None, transcript_text, counter)

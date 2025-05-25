@@ -96,6 +96,80 @@ Please ensure all information is extracted accurately from the transcript. If ce
 """
         return prompt
     
+    def create_ai_assessment_prompt(self, transcript):
+        """
+        Create a prompt specifically for AI medical assessment with disease analysis
+        
+        Args:
+            transcript (str): The medical conversation transcript
+            
+        Returns:
+            str: Formatted prompt for AI assessment
+        """
+        prompt = f"""
+You are an expert AI medical assistant. Analyze the following doctor-patient conversation transcript and provide a comprehensive medical assessment. Focus on clinical reasoning, potential diagnoses, and evidence-based recommendations.
+
+TRANSCRIPT:
+{transcript}
+
+Please provide your analysis in the following structured format:
+
+## 🔍 SYMPTOM ANALYSIS
+- **Primary Symptoms:** [List main symptoms with clinical significance]
+- **Symptom Pattern:** [Describe the pattern, onset, progression]
+- **Red Flags:** [Any concerning symptoms that require immediate attention]
+- **Symptom Severity Score:** [Rate 1-10 with justification]
+
+## 🩺 DIFFERENTIAL DIAGNOSIS
+- **Most Likely Diagnosis:** [Primary suspected condition with confidence %]
+- **Alternative Diagnoses:** [List 2-3 other possible conditions with likelihood]
+- **Ruling Out:** [Serious conditions to exclude]
+- **Clinical Reasoning:** [Explain the diagnostic thinking process]
+
+## ⚠️ SEVERITY ASSESSMENT
+- **Overall Severity:** [Mild/Moderate/Severe/Critical]
+- **Urgency Level:** [Routine/Urgent/Emergency]
+- **Risk Factors:** [Patient-specific risk factors]
+- **Prognosis:** [Expected outcome with and without treatment]
+
+## 🎯 RECOMMENDED NEXT STEPS
+### Immediate Actions (0-24 hours):
+- [List immediate steps needed]
+
+### Short-term Actions (1-7 days):
+- [List follow-up actions]
+
+### Long-term Management (1+ weeks):
+- [List ongoing care recommendations]
+
+## 🧪 SUGGESTED INVESTIGATIONS
+- **Essential Tests:** [Must-have diagnostic tests]
+- **Additional Tests:** [Helpful but not critical tests]
+- **Monitoring Parameters:** [What to track over time]
+
+## 🚨 WARNING SIGNS
+- **When to Seek Emergency Care:** [Red flag symptoms]
+- **Follow-up Triggers:** [When to return for reassessment]
+
+## 💊 TREATMENT CONSIDERATIONS
+- **Pharmacological:** [Medication recommendations with rationale]
+- **Non-pharmacological:** [Lifestyle, therapy recommendations]
+- **Contraindications:** [What to avoid]
+
+## 📋 PATIENT EDUCATION PRIORITIES
+- **Key Points to Explain:** [Most important information for patient]
+- **Lifestyle Modifications:** [Specific changes needed]
+- **Compliance Factors:** [How to ensure treatment adherence]
+
+## 🔮 AI CONFIDENCE ASSESSMENT
+- **Diagnostic Confidence:** [High/Medium/Low with explanation]
+- **Recommendation Strength:** [Strong/Moderate/Weak evidence base]
+- **Limitations:** [What information is missing for better assessment]
+
+**IMPORTANT DISCLAIMER:** This AI assessment is for educational and supportive purposes only. It should not replace professional medical judgment. All recommendations should be validated by qualified healthcare professionals before implementation.
+"""
+        return prompt
+    
     def analyze_transcript(self, transcript):
         """
         Analyze medical transcript using Gemini 2.5 Flash
@@ -117,6 +191,57 @@ Please ensure all information is extracted accurately from the transcript. If ce
             
         except Exception as e:
             print(f"Error analyzing transcript: {str(e)}")
+            return None
+
+    def generate_ai_assessment(self, transcript):
+        """
+        Generate AI medical assessment with disease analysis, severity, and next steps
+        
+        Args:
+            transcript (str): The medical conversation transcript
+            
+        Returns:
+            str: AI medical assessment with diagnoses and recommendations
+        """
+        try:
+            # Create the AI assessment prompt
+            prompt = self.create_ai_assessment_prompt(transcript)
+            
+            # Generate response using Gemini
+            response = self.model.generate_content(prompt)
+            
+            return response.text
+            
+        except Exception as e:
+            print(f"Error generating AI assessment: {str(e)}")
+            return None
+
+    def generate_comprehensive_analysis(self, transcript):
+        """
+        Generate both medical report and AI assessment
+        
+        Args:
+            transcript (str): The medical conversation transcript
+            
+        Returns:
+            dict: Dictionary containing both report and assessment
+        """
+        try:
+            # Generate medical report
+            medical_report = self.analyze_transcript(transcript)
+            
+            # Generate AI assessment
+            ai_assessment = self.generate_ai_assessment(transcript)
+            
+            return {
+                'medical_report': medical_report,
+                'ai_assessment': ai_assessment,
+                'timestamp': datetime.now().isoformat(),
+                'model_used': 'gemini-2.5-flash-preview-05-20'
+            }
+            
+        except Exception as e:
+            print(f"Error generating comprehensive analysis: {str(e)}")
             return None
     
     def load_transcript_from_file(self, file_path):
