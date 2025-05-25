@@ -1,0 +1,7 @@
+streamlit>=1.28.0
+google-cloud-speech>=2.21.0
+google-oauth2-tool>=0.0.3
+google-auth>=2.22.0
+google-cloud-aiplatform>=1.34.0
+reportlab>=4.0.4
+Pillow>=10.0.0 

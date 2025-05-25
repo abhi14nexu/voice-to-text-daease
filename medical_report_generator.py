@@ -6,31 +6,211 @@ from vertexai.generative_models import GenerativeModel
 from google.oauth2 import service_account
 
 class MedicalReportGenerator:
-    def __init__(self, project_id="", location="us-central1", credentials_path=None):
+    def __init__(self, project_id, credentials_path=None, credentials=None):
         """
-        Initialize the Medical Report Generator with Vertex AI
+        Initialize the Medical Report Generator
         
         Args:
             project_id (str): Google Cloud Project ID
-            location (str): Vertex AI location
-            credentials_path (str): Path to service account JSON file (optional)
+            credentials_path (str, optional): Path to service account JSON file
+            credentials (google.oauth2.service_account.Credentials, optional): Credentials object
         """
         self.project_id = project_id
-        self.location = location
         
-        # Initialize Vertex AI with optional credentials
-        if credentials_path and os.path.exists(credentials_path):
-            credentials = service_account.Credentials.from_service_account_file(credentials_path)
-            vertexai.init(project=project_id, location=location, credentials=credentials)
-            print(f"Using credentials from: {credentials_path}")
+        # Use provided credentials or load from file
+        if credentials:
+            self.credentials = credentials
+        elif credentials_path:
+            self.credentials = service_account.Credentials.from_service_account_file(credentials_path)
         else:
-            # Use default credentials (environment variable or gcloud)
-            vertexai.init(project=project_id, location=location)
-            print("Using default credentials (environment variable or gcloud)")
+            raise ValueError("Either credentials or credentials_path must be provided")
         
-        # Load Gemini 2.5 Flash model
-        self.model = GenerativeModel("publishers/google/models/gemini-2.5-flash-preview-05-20")
+        # Initialize Vertex AI
+        vertexai.init(
+            project=self.project_id,
+            credentials=self.credentials
+        )
         
+        # Initialize the model
+        self.model = GenerativeModel("gemini-2.0-flash-exp")
+
+    def analyze_transcript(self, transcript):
+        """
+        Generate a structured medical report from a conversation transcript
+        
+        Args:
+            transcript (str): The medical conversation transcript
+            
+        Returns:
+            str: Formatted medical report
+        """
+        prompt = f"""
+        You are an expert medical assistant. Analyze the following medical conversation transcript and generate a comprehensive, structured medical report. 
+
+        **TRANSCRIPT:**
+        {transcript}
+
+        **INSTRUCTIONS:**
+        Generate a detailed medical report with the following sections:
+
+        ## Patient Information
+        - Extract any mentioned patient demographics, age, gender, etc.
+        - If not explicitly mentioned, note as "Not specified in transcript"
+
+        ## Chief Complaint
+        - Primary reason for the visit
+        - Patient's main concerns in their own words
+
+        ## History of Present Illness
+        - Detailed description of current symptoms
+        - Timeline and progression
+        - Associated symptoms
+        - Aggravating and relieving factors
+
+        ## Past Medical History
+        - Previous medical conditions
+        - Previous surgeries or hospitalizations
+        - Current medications (if mentioned)
+
+        ## Physical Examination
+        - Any examination findings mentioned
+        - Vital signs if discussed
+
+        ## Assessment
+        - Clinical impression
+        - Differential diagnoses
+        - Severity assessment
+
+        ## Plan
+        - Diagnostic tests recommended
+        - Treatment recommendations
+        - Follow-up instructions
+        - Patient education points
+
+        ## Additional Notes
+        - Any other relevant information
+        - Recommendations for further evaluation
+
+        **FORMAT REQUIREMENTS:**
+        - Use clear, professional medical language
+        - Be thorough but concise
+        - If information is not available in the transcript, clearly state "Not mentioned in transcript"
+        - Maintain patient confidentiality standards
+        - Use bullet points for clarity where appropriate
+        """
+
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"Error generating medical report: {str(e)}"
+
+    def generate_ai_assessment(self, transcript):
+        """
+        Generate an AI medical assessment with disease analysis and recommendations
+        
+        Args:
+            transcript (str): The medical conversation transcript
+            
+        Returns:
+            str: Formatted AI medical assessment
+        """
+        prompt = f"""
+        You are an advanced AI medical diagnostic assistant. Analyze the following medical conversation transcript and provide a comprehensive medical assessment with disease analysis, severity evaluation, and next steps.
+
+        **TRANSCRIPT:**
+        {transcript}
+
+        **INSTRUCTIONS:**
+        Provide a detailed AI medical assessment with the following sections:
+
+        ## Symptom Analysis
+        - List and categorize all symptoms mentioned
+        - Identify symptom patterns and relationships
+        - Note symptom severity and duration
+
+        ## Differential Diagnosis
+        - List possible conditions based on symptoms
+        - Rank by likelihood with brief reasoning
+        - Include both common and serious conditions to consider
+
+        ## Disease Severity Assessment
+        - Evaluate urgency level (Low/Moderate/High/Critical)
+        - Identify any red flag symptoms
+        - Risk stratification
+
+        ## Recommended Next Steps
+        - Immediate actions needed
+        - Diagnostic tests to consider
+        - Specialist referrals if indicated
+
+        ## Suggested Investigations
+        - Laboratory tests
+        - Imaging studies
+        - Other diagnostic procedures
+        - Priority order of investigations
+
+        ## Warning Signs to Monitor
+        - Symptoms that would require immediate medical attention
+        - When to return for follow-up
+        - Emergency situations to watch for
+
+        ## Treatment Considerations
+        - General treatment approaches
+        - Lifestyle modifications
+        - Medication considerations (general categories)
+
+        ## Patient Education Priorities
+        - Key points to explain to patient
+        - Self-care instructions
+        - Prevention strategies
+
+        ## AI Confidence Assessment
+        - Confidence level in assessment (High/Medium/Low)
+        - Factors affecting confidence
+        - Limitations of this analysis
+
+        **IMPORTANT NOTES:**
+        - This is an AI assessment for educational/reference purposes only
+        - Always emphasize the need for professional medical evaluation
+        - Do not provide specific medication dosages or definitive diagnoses
+        - Highlight when immediate medical attention is needed
+        - Be clear about limitations and uncertainties
+
+        **FORMAT:**
+        Use clear headings, bullet points, and professional medical language.
+        """
+
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"Error generating AI assessment: {str(e)}"
+
+    def generate_comprehensive_analysis(self, transcript):
+        """
+        Generate both medical report and AI assessment
+        
+        Args:
+            transcript (str): The medical conversation transcript
+            
+        Returns:
+            dict: Dictionary containing both analyses
+        """
+        try:
+            medical_report = self.analyze_transcript(transcript)
+            ai_assessment = self.generate_ai_assessment(transcript)
+            
+            return {
+                'medical_report': medical_report,
+                'ai_assessment': ai_assessment,
+                'timestamp': json.dumps({"generated_at": "now"}, default=str)
+            }
+        except Exception as e:
+            return {
+                'error': f"Error generating comprehensive analysis: {str(e)}"
+            }
+
     def create_medical_analysis_prompt(self, transcript):
         """
         Create a structured prompt for medical transcript analysis
@@ -170,80 +350,6 @@ Please provide your analysis in the following structured format:
 """
         return prompt
     
-    def analyze_transcript(self, transcript):
-        """
-        Analyze medical transcript using Gemini 2.5 Flash
-        
-        Args:
-            transcript (str): The medical conversation transcript
-            
-        Returns:
-            str: Structured medical report
-        """
-        try:
-            # Create the prompt
-            prompt = self.create_medical_analysis_prompt(transcript)
-            
-            # Generate response using Gemini
-            response = self.model.generate_content(prompt)
-            
-            return response.text
-            
-        except Exception as e:
-            print(f"Error analyzing transcript: {str(e)}")
-            return None
-
-    def generate_ai_assessment(self, transcript):
-        """
-        Generate AI medical assessment with disease analysis, severity, and next steps
-        
-        Args:
-            transcript (str): The medical conversation transcript
-            
-        Returns:
-            str: AI medical assessment with diagnoses and recommendations
-        """
-        try:
-            # Create the AI assessment prompt
-            prompt = self.create_ai_assessment_prompt(transcript)
-            
-            # Generate response using Gemini
-            response = self.model.generate_content(prompt)
-            
-            return response.text
-            
-        except Exception as e:
-            print(f"Error generating AI assessment: {str(e)}")
-            return None
-
-    def generate_comprehensive_analysis(self, transcript):
-        """
-        Generate both medical report and AI assessment
-        
-        Args:
-            transcript (str): The medical conversation transcript
-            
-        Returns:
-            dict: Dictionary containing both report and assessment
-        """
-        try:
-            # Generate medical report
-            medical_report = self.analyze_transcript(transcript)
-            
-            # Generate AI assessment
-            ai_assessment = self.generate_ai_assessment(transcript)
-            
-            return {
-                'medical_report': medical_report,
-                'ai_assessment': ai_assessment,
-                'timestamp': datetime.now().isoformat(),
-                'model_used': 'gemini-2.5-flash-preview-05-20'
-            }
-            
-        except Exception as e:
-            print(f"Error generating comprehensive analysis: {str(e)}")
-            return None
-    
     def load_transcript_from_file(self, file_path):
         """
         Load transcript from a file (supports .txt and .json)
@@ -316,7 +422,6 @@ def main():
     """
     # Configuration
     PROJECT_ID = "daease-transcription"  # Your Google Cloud Project ID
-    LOCATION = "us-central1"
     
     # Option 1: Use service account key file directly (replace with your actual file name)
     CREDENTIALS_PATH = "daease-transcription-4f98056e2b9c.json"  # Update this filename
@@ -326,10 +431,10 @@ def main():
     
     # Initialize the generator
     if CREDENTIALS_PATH and os.path.exists(CREDENTIALS_PATH):
-        generator = MedicalReportGenerator(project_id=PROJECT_ID, location=LOCATION, credentials_path=CREDENTIALS_PATH)
+        generator = MedicalReportGenerator(project_id=PROJECT_ID, credentials_path=CREDENTIALS_PATH)
     else:
         print("Credentials file not found, using environment variable...")
-        generator = MedicalReportGenerator(project_id=PROJECT_ID, location=LOCATION)
+        generator = MedicalReportGenerator(project_id=PROJECT_ID)
     
     # Example usage options:
     
@@ -409,7 +514,7 @@ def main():
             "timestamp": datetime.now().isoformat(),
             "original_transcript": transcript,
             "generated_report": report,
-            "model_used": "gemini-2.5-flash-preview-05-20"
+            "model_used": "gemini-2.0-flash-exp"
         }
         
         json_output = output_file.replace('.txt', '.json') if output_file else 'medical_report.json'
