@@ -122,7 +122,7 @@ def transcribe_audio_file(audio_file, language_code):
             encoding=encoding,
             sample_rate_hertz=sample_rate,
             language_code=language_code,
-            enable_automatic_punctuation=True,
+                enable_automatic_punctuation=True,
         )
         
         # Perform transcription
@@ -850,25 +850,47 @@ def main():
             
             # Process received transcript
             if transcript_from_js and transcript_from_js.strip():
-                # Save the transcript
-                transcription_id = save_transcription(transcript_from_js.strip(), "web-speech-api")
-                st.session_state.current_transcript = transcript_from_js.strip()
-                st.session_state.last_transcription_id = transcription_id
-                
-                st.success(f"✅ Real-time transcription saved! (ID: {transcription_id})")
-                st.info(f"📝 **Transcript Preview:** {transcript_from_js[:100]}...")
-                
-                # Clear the URL parameter
-                st.query_params.clear()
-                
-                # Auto-scroll to show the transcript
-                st.markdown("""
-                <script>
-                setTimeout(function() {
-                    window.scrollTo(0, document.body.scrollHeight);
-                }, 500);
-                </script>
-                """, unsafe_allow_html=True)
+                try:
+                    # Save the transcript
+                    transcription_id = save_transcription(transcript_from_js.strip(), "web-speech-api")
+                    st.session_state.current_transcript = transcript_from_js.strip()
+                    st.session_state.last_transcription_id = transcription_id
+                    
+                    st.success(f"✅ Real-time transcription saved! (ID: {transcription_id})")
+                    st.info(f"📝 **Transcript Preview:** {transcript_from_js[:100]}...")
+                    
+                    # Add buttons for manual report generation
+                    st.markdown("---")
+                    st.markdown("### 🏥 Generate Medical Analysis")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("📋 Generate Medical Report", type="primary", use_container_width=True):
+                            with st.spinner("🤖 Generating medical report..."):
+                                st.session_state.medical_report = generate_medical_report(transcript_from_js.strip())
+                                if st.session_state.medical_report:
+                                    st.session_state.pdf_data = create_pdf_report(
+                                        st.session_state.medical_report,
+                                        transcript_from_js.strip(),
+                                        transcription_id
+                                    )
+                                    st.success("✅ Medical report generated!")
+                                else:
+                                    st.error("❌ Failed to generate medical report")
+                    
+                    with col2:
+                        if st.button("🩺 Generate AI Assessment", type="primary", use_container_width=True):
+                            with st.spinner("🧠 Generating AI assessment..."):
+                                st.session_state.ai_assessment = generate_ai_assessment(transcript_from_js.strip())
+                                if st.session_state.ai_assessment:
+                                    st.success("✅ AI assessment generated!")
+                                else:
+                                    st.error("❌ Failed to generate AI assessment")
+                    
+                    # Clear the URL parameter
+                    st.query_params.clear()
+                except Exception as e:
+                    st.error(f"❌ Error processing transcription: {str(e)}")
             
             # Fallback audio recorder
             with st.expander("🎙️ Alternative: Record & Upload Method", expanded=False):
@@ -1080,8 +1102,8 @@ def main():
                                             st.markdown(assessment)
                     else:
                         st.caption("No transcript content")
-        else:
-            st.info("📭 No transcriptions yet. Upload an audio file or enter text to get started!")
+            else:
+                st.info("📭 No transcriptions yet. Upload an audio file or enter text to get started!")
             
         st.markdown('</div>', unsafe_allow_html=True)
 
