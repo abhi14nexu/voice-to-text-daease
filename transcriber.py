@@ -810,59 +810,51 @@ def main():
             <script>
             window.addEventListener('message', function(event) {
                 if (event.data.type === 'speech_transcript_ready') {
-                    // Store transcript in session storage for Streamlit to pick up
-                    sessionStorage.setItem('web_speech_transcript', event.data.transcript);
-                    sessionStorage.setItem('transcript_timestamp', Date.now());
+                    // Use URL parameters to pass transcript to Streamlit
+                    const urlParams = new URLSearchParams(window.location.search);
+                    urlParams.set('web_speech_transcript', encodeURIComponent(event.data.transcript));
+                    urlParams.set('transcript_timestamp', Date.now());
                     
-                    // Trigger a page refresh to process the transcript
-                    window.location.reload();
-                }
-            });
-            
-            // Check for saved transcript on page load
-            window.addEventListener('load', function() {
-                const savedTranscript = sessionStorage.getItem('web_speech_transcript');
-                const timestamp = sessionStorage.getItem('transcript_timestamp');
-                
-                if (savedTranscript && timestamp) {
-                    // Clear from session storage
-                    sessionStorage.removeItem('web_speech_transcript');
-                    sessionStorage.removeItem('transcript_timestamp');
-                    
-                    // Show success message
-                    const successDiv = document.createElement('div');
-                    successDiv.style.cssText = 'background: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #c3e6cb;';
-                    successDiv.innerHTML = '✅ Transcript received from speech recognition!';
-                    document.body.insertBefore(successDiv, document.body.firstChild);
+                    // Update URL and reload page
+                    window.location.href = window.location.pathname + '?' + urlParams.toString();
                 }
             });
             </script>
             """, unsafe_allow_html=True)
             
-            # Check for transcript in session storage (after page reload)
-            transcript_from_js = st.query_params.get("transcript", None)
-            if not transcript_from_js:
-                # Try to get from URL parameters (alternative method)
-                import urllib.parse
-                current_url = st.query_params
-                if "web_speech_transcript" in current_url:
-                    transcript_from_js = urllib.parse.unquote(current_url["web_speech_transcript"])
+            # Check for transcript from Web Speech API
+            web_speech_transcript = st.query_params.get("web_speech_transcript", None)
+            transcript_timestamp = st.query_params.get("transcript_timestamp", None)
             
-            # Process received transcript
-            if transcript_from_js and transcript_from_js.strip():
+            # Process Web Speech API transcript
+            if web_speech_transcript and transcript_timestamp:
                 try:
+                    import urllib.parse
+                    decoded_transcript = urllib.parse.unquote(web_speech_transcript)
+                    
                     # Save the transcript
-                    transcription_id = save_transcription(transcript_from_js.strip(), "web-speech-api")
-                    st.session_state.current_transcript = transcript_from_js.strip()
+                    transcription_id = save_transcription(decoded_transcript, "web-speech-api")
+                    st.session_state.current_transcript = decoded_transcript
                     st.session_state.last_transcription_id = transcription_id
                     
                     st.success(f"✅ Real-time transcription saved! (ID: {transcription_id})")
-                    st.info(f"📝 **Transcript Preview:** {transcript_from_js[:100]}...")
+                    st.info(f"📝 **Transcript Preview:** {decoded_transcript[:100]}...")
                     
-                    # Clear the URL parameter
+                    # Clear the URL parameters
                     st.query_params.clear()
+                    st.rerun()
+                    
                 except Exception as e:
                     st.error(f"❌ Error processing transcription: {str(e)}")
+            
+            # Debug section - show if transcript is in URL
+            if st.query_params:
+                with st.expander("🐛 Debug Info", expanded=False):
+                    st.write("URL Parameters:", dict(st.query_params))
+                    if "web_speech_transcript" in st.query_params:
+                        st.write("Transcript found in URL!")
+                    else:
+                        st.write("No transcript in URL parameters")
             
             # Fallback audio recorder
             with st.expander("🎙️ Alternative: Record & Upload Method", expanded=False):
