@@ -859,100 +859,12 @@ def main():
                     st.success(f"✅ Real-time transcription saved! (ID: {transcription_id})")
                     st.info(f"📝 **Transcript Preview:** {transcript_from_js[:100]}...")
                     
-                    # Add buttons for manual report generation
-                    st.markdown("---")
-                    st.markdown("### 🏥 Generate Medical Analysis")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("📋 Generate Medical Report", type="primary", use_container_width=True):
-                            with st.spinner("🤖 Generating medical report..."):
-                                st.session_state.medical_report = generate_medical_report(transcript_from_js.strip())
-                                if st.session_state.medical_report:
-                                    st.session_state.pdf_data = create_pdf_report(
-                                        st.session_state.medical_report,
-                                        transcript_from_js.strip(),
-                                        transcription_id
-                                    )
-                                    st.success("✅ Medical report generated!")
-                                else:
-                                    st.error("❌ Failed to generate medical report")
-                    
-                    with col2:
-                        if st.button("🩺 Generate AI Assessment", type="primary", use_container_width=True):
-                            with st.spinner("🧠 Generating AI assessment..."):
-                                st.session_state.ai_assessment = generate_ai_assessment(transcript_from_js.strip())
-                                if st.session_state.ai_assessment:
-                                    st.success("✅ AI assessment generated!")
-                                else:
-                                    st.error("❌ Failed to generate AI assessment")
-                    
                     # Clear the URL parameter
                     st.query_params.clear()
                 except Exception as e:
                     st.error(f"❌ Error processing transcription: {str(e)}")
-            
-            # Fallback audio recorder
-            with st.expander("🎙️ Alternative: Record & Upload Method", expanded=False):
-                st.markdown("**Use this if the Web Speech API doesn't work on your device**")
-                st.info("This method records audio and lets you download it, then upload it in the 'Upload Audio File' tab for transcription.")
-                components.html(get_audio_recorder_component(), height=350)
         
-        with tab2:
-            st.markdown("**Upload an audio file for transcription**")
-            
-            # Language selection
-            selected_language = st.selectbox(
-                "Select Language",
-                options=list(SUPPORTED_LANGUAGES.keys()),
-                index=0
-            )
-            
-            # File upload
-            uploaded_file = st.file_uploader(
-                "Choose an audio file",
-                type=['wav', 'mp3', 'm4a', 'flac', 'webm'],
-                help="Supported formats: WAV, MP3, M4A, FLAC, WebM (from browser recorder)"
-            )
-            
-            if uploaded_file is not None:
-                st.audio(uploaded_file, format='audio/wav')
-                
-                if st.button("🎤 Transcribe Audio", type="primary", use_container_width=True):
-                    with st.spinner("🤖 Transcribing audio..."):
-                        language_code = SUPPORTED_LANGUAGES[selected_language]
-                        transcript = transcribe_audio_file(uploaded_file, language_code)
-                        
-                        if transcript:
-                            st.session_state.current_transcript = transcript
-                            # Save transcription
-                            transcription_id = save_transcription(transcript, language_code)
-                            st.session_state.last_transcription_id = transcription_id
-                            st.success(f"✅ Transcription completed! (ID: {transcription_id})")
-                        else:
-                            st.error("❌ Failed to transcribe audio")
-        
-        with tab3:
-            st.markdown("**Enter or paste text directly**")
-            
-            text_input = st.text_area(
-                "Medical Conversation Text",
-                height=200,
-                placeholder="Enter the medical conversation text here...",
-                help="Paste or type the medical conversation you want to analyze"
-            )
-            
-            if st.button("📝 Use This Text", type="primary", use_container_width=True):
-                if text_input.strip():
-                    st.session_state.current_transcript = text_input.strip()
-                    # Save transcription
-                    transcription_id = save_transcription(text_input.strip(), "manual-input")
-                    st.session_state.last_transcription_id = transcription_id
-                    st.success(f"✅ Text saved! (ID: {transcription_id})")
-                else:
-                    st.warning("⚠️ Please enter some text")
-        
-        # Display current transcript
+        # Display current transcript and analysis buttons (moved outside the if block)
         if st.session_state.current_transcript:
             st.markdown("---")
             st.markdown('<div class="card-header">📄 Current Transcript</div>', unsafe_allow_html=True)
@@ -970,43 +882,42 @@ def main():
             analysis_col1, analysis_col2, analysis_col3 = st.columns([1, 1, 1])
             
             with analysis_col1:
-                if st.button("📋 Medical Report", type="primary", use_container_width=True):
-                    with st.spinner("🤖 Generating report..."):
+                if st.button("📋 Generate Medical Report", type="primary", use_container_width=True):
+                    with st.spinner("🤖 Generating medical report..."):
                         st.session_state.medical_report = generate_medical_report(st.session_state.current_transcript)
                         if st.session_state.medical_report:
-                            st.success("✅ Report generated!")
-                        else:
-                            st.error("❌ Generation failed")
-            
-            with analysis_col2:
-                if st.button("🩺 AI Assessment", type="primary", use_container_width=True):
-                    with st.spinner("🧠 Generating assessment..."):
-                        st.session_state.ai_assessment = generate_ai_assessment(st.session_state.current_transcript)
-                        if st.session_state.ai_assessment:
-                            st.success("✅ Assessment generated!")
-                        else:
-                            st.error("❌ Generation failed")
-            
-            with analysis_col3:
-                if st.session_state.medical_report or st.session_state.ai_assessment:
-                    with st.popover("⚙️ Actions", use_container_width=True):
-                        if st.session_state.medical_report:
-                            pdf_data = create_pdf_report(
+                            st.session_state.pdf_data = create_pdf_report(
                                 st.session_state.medical_report,
                                 st.session_state.current_transcript,
                                 st.session_state.last_transcription_id
                             )
-                            if pdf_data:
-                                filename = f"medical_report_{st.session_state.last_transcription_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                                st.download_button(
-                                    label="📄 Download PDF",
-                                    data=pdf_data,
-                                    file_name=filename,
-                                    mime="application/pdf",
-                                    use_container_width=True
-                                )
+                            st.success("✅ Medical report generated!")
+                        else:
+                            st.error("❌ Failed to generate medical report")
             
-            # Display results
+            with analysis_col2:
+                if st.button("🩺 Generate AI Assessment", type="primary", use_container_width=True):
+                    with st.spinner("🧠 Generating AI assessment..."):
+                        st.session_state.ai_assessment = generate_ai_assessment(st.session_state.current_transcript)
+                        if st.session_state.ai_assessment:
+                            st.success("✅ AI assessment generated!")
+                        else:
+                            st.error("❌ Failed to generate AI assessment")
+            
+            with analysis_col3:
+                if st.session_state.medical_report or st.session_state.ai_assessment:
+                    with st.popover("⚙️ Actions", use_container_width=True):
+                        if st.session_state.medical_report and st.session_state.pdf_data:
+                            filename = f"medical_report_{st.session_state.last_transcription_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                            st.download_button(
+                                label="📄 Download PDF",
+                                data=st.session_state.pdf_data,
+                                file_name=filename,
+                                mime="application/pdf",
+                                use_container_width=True
+                            )
+            
+            # Display results if available
             if st.session_state.medical_report or st.session_state.ai_assessment:
                 st.markdown("---")
                 
