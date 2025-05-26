@@ -863,8 +863,68 @@ def main():
                     st.query_params.clear()
                 except Exception as e:
                     st.error(f"❌ Error processing transcription: {str(e)}")
+            
+            # Fallback audio recorder
+            with st.expander("🎙️ Alternative: Record & Upload Method", expanded=False):
+                st.markdown("**Use this if the Web Speech API doesn't work on your device**")
+                st.info("This method records audio and lets you download it, then upload it in the 'Upload Audio File' tab for transcription.")
+                components.html(get_audio_recorder_component(), height=350)
         
-        # Display current transcript and analysis buttons (moved outside the if block)
+        with tab2:
+            st.markdown("**Upload an audio file for transcription**")
+            
+            # Language selection
+            selected_language = st.selectbox(
+                "Select Language",
+                options=list(SUPPORTED_LANGUAGES.keys()),
+                index=0
+            )
+            
+            # File upload
+            uploaded_file = st.file_uploader(
+                "Choose an audio file",
+                type=['wav', 'mp3', 'm4a', 'flac', 'webm'],
+                help="Supported formats: WAV, MP3, M4A, FLAC, WebM (from browser recorder)"
+            )
+            
+            if uploaded_file is not None:
+                st.audio(uploaded_file, format='audio/wav')
+                
+                if st.button("🎤 Transcribe Audio", type="primary", use_container_width=True):
+                    with st.spinner("🤖 Transcribing audio..."):
+                        language_code = SUPPORTED_LANGUAGES[selected_language]
+                        transcript = transcribe_audio_file(uploaded_file, language_code)
+                        
+                        if transcript:
+                            st.session_state.current_transcript = transcript
+                            # Save transcription
+                            transcription_id = save_transcription(transcript, language_code)
+                            st.session_state.last_transcription_id = transcription_id
+                            st.success(f"✅ Transcription completed! (ID: {transcription_id})")
+                        else:
+                            st.error("❌ Failed to transcribe audio")
+        
+        with tab3:
+            st.markdown("**Enter or paste text directly**")
+            
+            text_input = st.text_area(
+                "Medical Conversation Text",
+                height=200,
+                placeholder="Enter the medical conversation text here...",
+                help="Paste or type the medical conversation you want to analyze"
+            )
+            
+            if st.button("📝 Use This Text", type="primary", use_container_width=True):
+                if text_input.strip():
+                    st.session_state.current_transcript = text_input.strip()
+                    # Save transcription
+                    transcription_id = save_transcription(text_input.strip(), "manual-input")
+                    st.session_state.last_transcription_id = transcription_id
+                    st.success(f"✅ Text saved! (ID: {transcription_id})")
+                else:
+                    st.warning("⚠️ Please enter some text")
+        
+        # Display current transcript and analysis buttons (moved outside the tabs)
         if st.session_state.current_transcript:
             st.markdown("---")
             st.markdown('<div class="card-header">📄 Current Transcript</div>', unsafe_allow_html=True)
